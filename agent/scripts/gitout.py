@@ -28,6 +28,33 @@ commit 返回 128，但 `git log` 里提交确实在。
 
 （`git add` 通常不打印任何东西，因此不受影响。）
 
+## ⚠️ 提交信息不要内联进 shell 字符串
+
+**踩过。** 把带正文的 `git commit -m "..."` 内联在 `bash -c "..."` 的双引号里，
+正文中的**反引号**会被 bash 当成命令替换先执行掉：
+
+```
+原文：检查 `!line.includes('三维视图')`
+落库：「 与 alt 文本都不残留」-> 检查 ，
+```
+
+反斜杠也会被吃掉（`D:\AirNav-Agent\...` → `D://AirNav-Agent//...`）。
+本项目已第三次踩这类坑（另一次是 MSYS 把 `--noproxy *` 展开成文件列表）。
+
+**正确姿势**：写进脚本文件，用 `subprocess` 以 **argv 列表**传参 —— 字符一个都不会被 shell 碰。
+长篇正文更推荐走 stdin，连中间文件都不用落：
+
+```python
+subprocess.run(["git", "commit", "-m", subject, "-m", body], cwd=REPO)
+subprocess.run(["git", "commit", "--amend", "-F", "-"],   # 从 stdin 读信息
+               cwd=REPO, input=message.encode("utf-8"))
+```
+
+为什么连 `-F <文件>` 都要绕开：本机 DLP 会在文件落盘后补 NUL 填充，
+而且**填充可能落在「你检查完」与「git 去读」之间的那一瞬** ——
+实测 `read_bytes()` 刚确认干净（1196 字节、无 NUL），git 读同一路径却报
+`error: a NUL byte in commit log message not allowed`。
+
 ## 原理
 
 git 的 stdout 是坏的，但 **它作为子进程被管道接住时是好的**：
