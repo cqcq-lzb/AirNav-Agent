@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -298,7 +299,10 @@ def register_tools(registry: ToolRegistry) -> None:
         "安全余量 minimum_clearance_mm、瓶颈位置、可达性分级与注意事项 warnings "
         "全都只在这里给出，rank_candidates 不返回这些。"
         "用户给了器械外径时必须把 device_diameter_mm 传进来（不要留默认值 0）。"
-        "返回长度、最窄直径、最大转角、分叉序列等摘要，并把路径折线存入 artifact（只返回 id）。"
+        "返回长度、最窄直径、最大转角、分叉序列等摘要。"
+        "⚠️ 本工具**不产出任何可查看的文件**（折线只在内存里）——"
+        "**不要在回答里写「三维视图已生成」或给出任何链接/ID**。"
+        "要出三维视图必须另外调用 render_viewer。"
         "规划失败会返回 ok=false 与原因，此时应改用更细的器械或换代价配置重试。",
         PlanArgs,
         # 与 rank_candidates 同批发出时，本调用会被循环自动延后一步 ——
@@ -320,7 +324,9 @@ def register_tools(registry: ToolRegistry) -> None:
         )
         baseline, baseline_note = _baseline_block(plan)
 
-        artifact_id = ctx.artifacts.put(
+        # 折线数据留痕（供 artifacts 列表与 trace 使用）。
+        # **不把返回的 id 带进 payload** —— 见下方 note 里的原因。
+        ctx.artifacts.put(
             "route",
             {
                 "points_xyz_mm": plan.points_xyz_mm,
@@ -346,8 +352,25 @@ def register_tools(registry: ToolRegistry) -> None:
             "route": _route_block(plan),
             "baseline_comparison": baseline,
             "warnings": _warnings(plan, baseline_note),
-            "artifact_id": artifact_id,
-            "artifact_note": "路径折线数据已存入 artifact，渲染三维视图时用 render_viewer 引用该 id",
+            # ⚠️ 这里**不能**出现任何像链接、像句柄的东西。
+            #
+            # 2026-09-17 实测的缺陷：旧版返回的是
+            #     "artifact_id": "route-001",
+            #     "artifact_note": "路径折线数据已存入 artifact，渲染三维视图时用 render_viewer 引用该 id"
+            # 两句都不成立 —— render_viewer 的入参是 case_id / candidate_id，**不吃 id**；
+            # 而且本工具**根本没有产出任何文件**。模型照字面复述成了
+            #     「三维路径可视化文件已生成，路径折线数据已存入 artifact，ID 为 route-001」
+            #     以及 markdown 死链 `![](route-001)`
+            # 两句话都是假的，用户点了个空。
+            #
+            # 根因不是提示词 —— 是**返回体本身在诱导**。模型只是把手里有的字段说出来，
+            # 跟 E01「并行盲调」是同一条教训：**提示词压不住数据，要改的是数据。**
+            # 所以这里既不给 id，也不给任何可被当成链接的字段，只给一句正确且可执行的说明。
+            "note": (
+                "本工具只返回数值结果，**不产出任何可查看的文件**"
+                "（路径折线数据只存在内部，没有 URL、不能点击）。"
+                "需要三维视图请调用 render_viewer，它会生成可直接打开的单文件 HTML。"
+            ),
         }
 
     @registry.tool(
@@ -539,19 +562,15 @@ def register_tools(registry: ToolRegistry) -> None:
             "baseline_comparison": baseline,
             "reachability": reach,
             "warnings": _warnings(plan, baseline_note),
-            "artifact_id": ctx.artifacts.put(
-                "route",
-                {
-                    "points_xyz_mm": plan.points_xyz_mm,
-                    "radii_mm": plan.radii_mm,
-                    "cumulative_mm": plan.cumulative_mm,
-                    "turn_angles_deg": plan.turn_angles_deg,
-                },
-                meta={
-                    "case_id": case.case_id,
-                    "candidate_id": candidate_id,
-                    "profile": plan.profile_name,
-                },
+            # 本工具**不额外存折线** —— 同一份数据 plan_route 已经存过了，
+            # 再存一次只会在 artifacts 列表里多出一张重复的「路径结果」卡片。
+            #
+            # 也**不返回 id**：一个裸的 `route-001` 会被模型当成「可视化已生成」的
+            # 句柄写进回答（实测过「三维视图已生成，ID 为 route-001」这句假话），
+            # 所以只给一句正确且可执行的说明。
+            "note": (
+                "本工具只返回数值与拓扑结果，**不产出任何可查看的文件**。"
+                "需要三维视图请调用 render_viewer。"
             ),
         }
 
@@ -679,7 +698,9 @@ def register_tools(registry: ToolRegistry) -> None:
             mesh_step=mesh_step,
         )
 
-        artifact = ctx.artifacts.put(
+        # viewer 文件已落盘，登记进 artifacts 供网页版的产物列表使用。
+        # **返回的 id 不带进 payload** —— 见下方 viewer_file 的注释。
+        ctx.artifacts.put(
             kind="viewer",
             payload=str(output.path),
             meta={
@@ -705,7 +726,12 @@ def register_tools(registry: ToolRegistry) -> None:
                 None,
             ),
             **output.to_dict(),
-            "artifact_id": artifact,
+            # 不给裸 id（`viewer-002` 这种），只给真文件。
+            # 理由同 plan_route：模型拿到一个 `xxx-NNN` 就会把它写成链接，
+            # `![](viewer-002)` 在浏览器里是一张破图。
+            # viewer_path 会被命令行场景直接交代给用户；
+            # 网页版则在前端把本地路径就地换成可点按钮（见 agent/web/static/index.html）。
+            "viewer_file": Path(output.path).name,
             "mesh_step": mesh_step,
             "contents": [
                 "气道表面（半透明，可剖切）",

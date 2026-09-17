@@ -188,11 +188,23 @@ def main() -> int:
     # 真正的几何泄露特征是一段超长 base64 连续串；airway_vertices 这类只是计数，不算。
     leak = re.search(r"[A-Za-z0-9+/]{200,}={0,2}", payload_text)
     assert leak is None, f"出图工具把几何写进了上下文（发现 {len(leak.group(0))} 字符的 base64 串）"
-    assert "artifact_id" in payload_text, "上下文里缺少 artifact id，模型无法引用"
+    # 出图工具必须给出**真文件**（viewer_path），而不是一个内部 id。
+    #
+    # 这条断言以前是反过来的：断言「上下文里必须有 artifact_id，模型才能引用」。
+    # 那个前提是错的 —— 没有任何工具吃 artifact_id 作为入参，模型拿到它唯一能做的
+    # 事就是把它写成链接。实测出现过 `![](route-001)` 破图，以及
+    # 「三维路径可视化文件已生成，ID 为 route-001」这种假话（那时根本没出图）。
+    # 所以现在的口径是：**给文件，不给 id**。
+    assert "viewer_path" in payload_text, "上下文里缺少 viewer_path，模型无法把文件交代给用户"
+    stray = re.search(r"(?:route|viewer|segmentation)-\d+", payload_text)
+    assert stray is None, (
+        f"出图工具把内部 artifact id（{stray.group(0) if stray else ''}）暴露进了上下文 ——"
+        "模型会把它当链接写进回答，变成死链"
+    )
     print(
         f"[验证通过] 出图工具进上下文 {len(payload_text)} 字符、"
         f"最长连续串 {max((len(s) for s in re.findall(r'[A-Za-z0-9+/]{20,}', payload_text)), default=0)} 字符，"
-        f"几何体已隔离在 artifact 中"
+        f"几何体已隔离在 artifact 中，且只给文件不给 id"
     )
 
     # 断言 6：整条轨迹的上下文体积可控（大对象没有随步数膨胀）

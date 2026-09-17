@@ -49,6 +49,9 @@
   .inline-art{margin:6px 2px 2px;padding:5px 12px;border:1px solid var(--accent);border-radius:6px;
     background:var(--accent-bg);color:var(--accent);font-weight:600;font-size:12.5px;cursor:pointer}
   .inline-art:hover{background:#d8e8f7}
+  /* 模型引用了没有文件的产物（比如把 route-001 当链接）。就地说明，别让它变破图。 */
+  .dead-ref{display:inline-block;margin:4px 2px;padding:3px 9px;border-radius:6px;
+    background:var(--warn-bg);border:1px solid #f0d9b0;color:var(--warn);font-size:12px}
 
   .runbox{align-self:flex-start;width:min(760px,92%);display:flex;flex-direction:column;gap:6px}
   .step{font-size:11px;color:var(--tx-3);letter-spacing:.4px;margin-top:2px}
@@ -183,6 +186,11 @@
   const log = $("log"), trace = $("trace"), arts = $("artifacts");
   let busy = false, backendDefault = "gpu41";
   const artByName = {};   // 文件名 -> 产物 URL，见 renderArtifacts
+  // 产物 id -> {url, filename, kind}。模型会把 `route-001` 这种 id 当成链接写进回答
+  // （因为工具返回体里曾经真的暴露过它），所以要能识别出来 —— 有这个 id 但它
+  // **没有文件**时，就地把死链换成一句能看懂的话，而不是让它渲染成破图。
+  const artById = {};
+  const ART_ID_RE = /^(?:route|viewer|segmentation)-\d+$/;
 
   // 产物 kind → 界面上的中文名。`route` 是**内存对象**（没有文件、没有 URL），
   // 它出现在列表里是对的 —— 告诉用户「这一版路径结果存下来了」，
@@ -196,30 +204,84 @@
       .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
-  // 模型会在回答里贴本地文件路径。挡不住 —— render_viewer 的返回里本来就带
-  // path 字段，提示词拦不住模型手里的数据（实测过，和 E01 是同一条教训）。
-  // 所以在这里就地把它换成能点的按钮：先把命中的路径换成占位符，
-  // 免得被下面的 markdown 规则搅乱，最后统一还原成 <button>。
-  const PH_A = "\u0001A", PH_B = "\u0001";
+  // 模型会在回答里贴两种东西，都要在这里就地处理掉：
+  //
+  // ① 本地文件路径（`D:\...\viewer_x.html`）—— 挡不住，因为 render_viewer 的
+  //    返回里本来就带 `viewer_path`，模型只是把它抄出来（和 E01 同一条教训）。
+  // ② 产物 **id**（`route-001`）—— 以前工具返回体里真的暴露过 `artifact_id`，
+  //    模型就把它当链接写成了 `![](route-001)`，在浏览器里是一张破图；
+  //    甚至会顺着说「三维视图已生成，ID 为 route-001」—— 可它根本没出图。
+  //    （源头已在 agent/tools/imaging.py 里去掉，这里是**第二道防线**：
+  //     万一模型还是写出来，也必须让人看懂，不能是个死链。）
+  //
+  // 做法：先把命中的东西换成占位符（免得被下面的 markdown 规则搅乱），
+  // 最后统一还原成按钮 / 说明文字。
+  const PH_A = "\u0001A", PH_I = "\u0001I", PH_B = "\u0001";
+  // 占位符里把 id 的 `-` 换成 \u0002 —— 否则「再兜一遍裸 id」那一步会把
+  // 自己刚写进去的占位符又匹配一次，套成两层。
+  const ID_SEP = "\u0002";
   function markArtifacts(text){
     function swap(whole, target){
-      const name = String(target).split(/[\\/]/).pop();
-      const url = artByName[name];
-      return url ? PH_A + url + PH_B + name + PH_B : whole;
+      const t = String(target);
+      // ① 有登记文件名的 → 换成按钮
+      const name = t.split(/[\\/]/).pop();
+      if (artByName[name]) return PH_A + artByName[name] + PH_B + name + PH_B;
+      // ② 长得像产物 id 的 → 交给 restore 决定（可点 / 说明它不是文件）
+      //    这里必须先校验形状，restore 才能安全地把它原样放进 HTML。
+      if (ART_ID_RE.test(t)) return PH_I + t.replace(/-/, ID_SEP) + PH_B;
+      return whole;
     }
     // `!?` 不能省：模型实测会写 markdown **图片**语法 `![](D:\...\x.html)`
     // （比 `[文字](路径)` 更常见，因为它把 viewer 当成一张图）。
     // 只匹配 `[..](..)` 的话，开头的 `!` 会留在原地变成正文里的孤零零一个叹号。
-    return text
-      .replace(/!?\[[^\]]*\]\(([^)\s]+\.(?:html|json))\)/g, (m, target) => swap(m, target))
-      .replace(/[A-Za-z]:\\[^\s)\]<>"'，。；]*\.(?:html|json)/g, (m) => swap(m, m));
+    return (
+      text
+        // ① 裸文件名（模型被引导成说「三维视图文件：viewer_x.html」，这是好行为，
+        //    但网页里得能点）。**只认登记表里有的名字**，所以不会误伤正文里
+        //    随手出现的 xxx.html。必须排在路径/链接之前 —— 否则它会命中
+        //    前面刚写进去的占位符，套成两层。
+        //    前置断言排除 `(` `/` `\`：那些是链接目标或路径的一部分，交给下面两行。
+        .replace(
+          /(?<![\w.\/\\()\[\]-])([A-Za-z0-9_.-]+\.(?:html|json))(?![\w\/])/g,
+          (m, name) =>
+            artByName[name] ? PH_A + artByName[name] + PH_B + name + PH_B : m
+        )
+        .replace(
+          /!?\[[^\]]*\]\(([^)\s]+\.(?:html|json)|[a-z]+-\d+)\)/g,
+          (m, target) => swap(m, target)
+        )
+        .replace(/[A-Za-z]:\\[^\s)\]<>"'，。；]*\.(?:html|json)/g, (m) => swap(m, m))
+        // 最后再兜一遍**散文里裸提的 id**：「三维视图已生成，ID 为 route-001」
+        // 这种句子比死链更误导（它直接断言了一件没发生的事）。
+        // 前后断言里带上 \u0001 和 `.`：前面几行已经写进去的占位符里含文件名，
+        // 万一它长得像 `route-001.html`，这里不能再咬一口（会套成两层）。
+        .replace(
+          /(?<![\w\u0001-])(?:route|viewer|segmentation)-\d+(?![\w\u0001.-])/g,
+          (m) => swap(m, m)
+        )
+    );
   }
   function restoreArtifacts(text){
-    return text.replace(
-      /\u0001A([^\u0001]+)\u0001([^\u0001]+)\u0001/g,
-      (m, url, name) =>
-        '<button type="button" class="inline-art" data-open="' + url +
-        '" data-name="' + name + '">打开三维视图</button>'
+    return (
+      text
+        .replace(
+          /\u0001A([^\u0001]+)\u0001([^\u0001]+)\u0001/g,
+          (m, url, name) =>
+            '<button type="button" class="inline-art" data-open="' + url +
+            '" data-name="' + name + '">打开三维视图</button>'
+        )
+        // 产物 id：真能点就出按钮，否则把它「不是文件」这件事说清楚。
+        .replace(/\u0001I([^\u0001]+)\u0001/g, (m, raw) => {
+          const id = raw.replace(ID_SEP, "-");
+          const hit = artById[id];
+          if (hit && hit.url){
+            return '<button type="button" class="inline-art" data-open="' + hit.url +
+                   '" data-name="' + (hit.filename || id) + '">打开三维视图</button>';
+          }
+          return '<span class="dead-ref">' + (hit ? "这里没有可查看的文件（" + id
+            + " 只是内部数据留痕）" : "引用了不存在的产物 " + id)
+            + "，需要三维视图请让我出图</span>";
+        })
     );
   }
 
@@ -337,6 +399,9 @@
           '<button type="button" class="primary" data-open="' + esc(it.url) + '" data-name="' + esc(it.filename) + '">页内查看</button>' +
           '<a href="' + esc(it.url) + '" target="_blank" rel="noopener">新标签打开</a></div>';
       }
+      // 所有产物都按 id 登记（**包括没有 url 的**）：模型可能引用 `route-001`，
+      // 有 url 的出按钮，没有 url 的也要能说清「它不是文件」，而不是变成破图。
+      if (it.id) artById[it.id] = { url: it.url || "", filename: it.filename || "", kind: it.kind };
       d.innerHTML = html;
       arts.appendChild(d);
     });
@@ -371,8 +436,9 @@
     addMsg("user", question);
     trace.innerHTML = '<span class="empty">还没有调用</span>';
     arts.innerHTML = '<span class="empty">还没有产物</span>';
-    // 清掉上一次的产物登记，否则旧文件名会被映射到旧 URL
+    // 清掉上一次的产物登记，否则旧文件名/旧 id 会被映射到旧 URL
     Object.keys(artByName).forEach(k => { delete artByName[k]; });
+    Object.keys(artById).forEach(k => { delete artById[k]; });
 
     const box = document.createElement("div");
     box.className = "runbox";

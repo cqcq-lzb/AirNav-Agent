@@ -49,12 +49,32 @@ const artByName = {
   "viewer_LIDC_0089_c1.html": "/artifacts/viewer_LIDC_0089_c1.html",
 };
 
-// 把抽出来的块塞进一个函数体，用参数注入 artByName
+// 产物 id -> {url, filename, kind}。**包括没有 url 的那些**（route 是内存对象）。
+const artById = {
+  "viewer-002": {
+    url: "/artifacts/viewer_LIDC_0089_c3.html",
+    filename: "viewer_LIDC_0089_c3.html",
+    kind: "viewer",
+  },
+  "route-001": { url: "", filename: "", kind: "route" },
+};
+
+// ART_ID_RE 也从源码里取，不抄一份（抄的会随源码漂移）
+const idReSource = html.match(/const ART_ID_RE = (\/[^\n]+\/);/);
+if (!idReSource) {
+  console.error("FAIL 在 index.html 里找不到 ART_ID_RE 的定义");
+  process.exit(1);
+}
+const ART_ID_RE = eval(idReSource[1]);
+
+// 把抽出来的块塞进一个函数体，用参数注入外部依赖
 const factory = new Function(
   "artByName",
+  "artById",
+  "ART_ID_RE",
   block + "\nreturn { esc, markArtifacts, restoreArtifacts, md };"
 );
-const { md, markArtifacts } = factory(artByName);
+const { md, markArtifacts } = factory(artByName, artById, ART_ID_RE);
 
 let failures = 0;
 function check(ok, label, detail) {
@@ -131,8 +151,58 @@ check(countButtons(out3) === 1, "只产生一个按钮", countButtons(out3) + " 
 check(out3.includes("<li><strong>气道表面</strong>：半透明，可剖切</li>"), "列表与粗体仍正常渲染");
 
 // ---------------------------------------------------------------- 用例 4
+// 用户实测报上来的现场：模型**没出图**，却宣称「三维路径可视化文件已生成」，
+// 并把工具返回体里那个 `artifact_id` 当链接写成了 `![](route-001)`。
+// route 是内存对象，没有文件 —— 界面必须把这件事说清楚，而不是渲染出破图。
+console.log("\n[4] `![](route-001)` —— 把产物 id 当链接（用户实测现场）");
+const answer4 =
+  "对于病例 LIDC_0089 的 3 号结节候选，规划出的路径如下：\n\n" +
+  "- **路径长度**：216.24 mm\n" +
+  "- **最窄直径**：5.92 mm\n\n" +
+  "三维路径可视化文件已生成，路径折线数据已存入 artifact，ID 为 route-001。\n\n" +
+  "如需查看路径的三维可视化，请点击下方链接：\n" +
+  "![](route-001)";
+const out4 = md(answer4);
+check(!out4.includes("](route-001)"), "不再留下 markdown 死链");
+check(!out4.includes("<img"), "不会渲染成破图");
+check(out4.includes('class="dead-ref"'), "换成一条能看懂的说明");
+check(out4.includes("没有可查看的文件"), "说明里点出「不是文件」");
+check(out4.includes("需要三维视图请让我出图"), "给出可执行的下一步");
+check(countButtons(out4) === 0, "不该凭空造出一个按钮", countButtons(out4) + " 个按钮");
+check(out4.includes("<li><strong>路径长度</strong>：216.24 mm</li>"), "正文其余内容不被搅乱");
+
+// ---------------------------------------------------------------- 用例 5
+// 反向的好情况：模型引用的是**真有文件**的产物 id，应当出按钮
+console.log("\n[5] `![](viewer-002)` —— 引用可查看的产物 id");
+const out5 = md("三维视图已生成：\n![](viewer-002)");
+check(out5.includes('data-open="/artifacts/viewer_LIDC_0089_c3.html"'), "换成指向真实文件的按钮");
+check(countButtons(out5) === 1, "一个按钮", countButtons(out5) + " 个按钮");
+check(!out5.includes("dead-ref"), "不该误判成死引用");
+
+// ---------------------------------------------------------------- 用例 6
+// 形状像产物 id、但这次会话里根本没有
+console.log("\n[6] `![](route-999)` —— 不存在的产物 id");
+const out6 = md("见 ![x](route-999)");
+check(out6.includes("引用了不存在的产物"), "明确说是「不存在的产物」");
+check(countButtons(out6) === 0, "不造按钮");
+
+// ---------------------------------------------------------------- 用例 7
+// 模型现在被告知「给文件名」（viewer_file），于是它会在正文里裸提文件名 ——
+// 这是**好行为**，网页里得能点。但只认登记表里有的名字，不能误伤随便一个 xxx.html。
+console.log("\n[7] 裸文件名 `viewer_LIDC_0089_c3.html`（模型被引导后的好行为）");
+const out7 = md(
+  "三维视图已生成。请查看以下文件：\n\n- **三维视图文件**：viewer_LIDC_0089_c3.html"
+);
+check(out7.includes('data-open="/artifacts/viewer_LIDC_0089_c3.html"'), "裸文件名换成可点按钮");
+check(countButtons(out7) === 1, "一个按钮", countButtons(out7) + " 个按钮");
+check(out7.includes("<li><strong>三维视图文件</strong>："), "列表与粗体不被搅乱");
+// 反向：没登记的名字不许动
+const out7b = md("随便提一个 notes.html 和 report.json，它们不是产物");
+check(!out7b.includes("<button"), "未登记的 .html / .json 名字保持纯文本");
+
+// ---------------------------------------------------------------- 用例 8
 // 反向：产物不在登记表里时不能乱改，也不能留下占位符
-console.log("\n[4] 反向用例 —— 未登记的路径");
+console.log("\n[8] 反向用例 —— 未登记的路径");
 const unknown = "见 [x](D:\\somewhere\\other_view.html) 和 ![](D:\\somewhere\\missing.html)";
 const kept = markArtifacts(unknown);
 check(kept.includes("other_view.html") && kept.includes("missing.html"), "未登记的路径保持原样");
@@ -140,8 +210,11 @@ check(!kept.includes("\u0001"), "不产生占位符残留");
 
 console.log("\n" + "=".repeat(68));
 console.log(failures ? `未通过：${failures} 项` : "全部通过");
-for (const [i, out] of [out1, out2, out3].entries()) {
+for (const [i, out] of [out1, out2, out3, out4, out5, out6, out7].entries()) {
   console.log(`\n[${i + 1}] 替换后的片段：`);
-  console.log(out.split("<br>").filter((l) => l.includes("button")).join("\n"));
+  const lines = out
+    .split("<br>")
+    .filter((l) => l.includes("button") || l.includes("dead-ref"));
+  console.log(lines.join("\n") || "（无）");
 }
 process.exit(failures ? 1 : 0);
