@@ -35,13 +35,14 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.agent_loop import NavAgent, _looks_like_intent_to_act  # noqa: E402
-from agent.llm.client import ScriptedClient  # noqa: E402
+from agent.llm.client import ChatReply, ScriptedClient, ToolCallRequest  # noqa: E402
 from agent.tools import NavSession, build_registry  # noqa: E402
 
 CASE = "LIDC_0089"
@@ -302,6 +303,100 @@ def check_normal_run_untouched() -> list[str]:
     return failures
 
 
+def _batched(*specs: tuple[str, dict]) -> ChatReply:
+    """一次回复里发多个工具调用，模拟真实模型的并行调用。"""
+    return ChatReply(
+        content="",
+        tool_calls=[
+            ToolCallRequest(
+                id=f"call_{name}_{index}",
+                name=name,
+                arguments=json.dumps(args, ensure_ascii=False),
+            )
+            for index, (name, args) in enumerate(specs)
+        ],
+    )
+
+
+def check_dependency_deferral() -> list[str]:
+    """有依赖关系的调用不得同批执行 —— 否则参数只能靠猜。
+
+    对应真实缺陷（2026-09-17，E01）：模型把 inspect_case / rank_candidates /
+    plan_route 打包在同一条消息发出，plan_route 的 candidate_id 只能瞎猜；
+    实测猜中不可达的候选 1 → ok=false → 模型又拿 rank_candidates 的数字
+    拼出一份「规划已完成」的结论（数字可溯源，连 grounding 都拦不住）。
+
+    提示词压不住，所以在循环里兜底。这一层守的就是那个兜底。
+    """
+    failures: list[str] = []
+    print("\n[6] 依赖延后 —— 同批里的 plan_route 必须先让出一步")
+
+    run = _make_agent(
+        [
+            _batched(
+                ("inspect_case", {"case_id": CASE}),
+                ("rank_candidates", {"case_id": CASE, "device_diameter_mm": 2.0}),
+                # 真实模型就是这么瞎猜的
+                ("plan_route", {"case_id": CASE, "candidate_id": 1,
+                                "device_diameter_mm": 2.0}),
+            ),
+            # 看到排序结果后重发，这次挑对了
+            ScriptedClient.tool("plan_route", case_id=CASE, candidate_id=3,
+                                device_diameter_mm=2.0),
+            ScriptedClient.say(REAL_ANSWER),
+        ]
+    ).run(f"{CASE} 上用 2.0mm 的器械，选一个最值得做的结节，给我完整的路径规划结论。")
+
+    first = run.steps[0]
+    checks = (
+        ("第一批只执行前置工具",
+         [call["name"] for call in first.tool_calls],
+         ["inspect_case", "rank_candidates"]),
+        ("被延后的正是 plan_route",
+         [call["name"] for call in first.deferred_calls],
+         ["plan_route"]),
+        ("被延后的调用写明了阻塞者",
+         [call["blocked_by"] for call in first.deferred_calls],
+         [["rank_candidates"]]),
+        ("延后的调用不得计入 called_tools（否则等于没执行也算调过）",
+         [call["name"] for call in first.tool_calls].count("plan_route"),
+         0),
+        ("最终 plan_route 用的是看到排序后重选的候选 3",
+         [r["arguments"].get("candidate_id")
+          for r in run.tool_records if r["tool"] == "plan_route" and r["ok"]],
+         [3]),
+        ("延后不算失败，stop_reason 仍是 answered", run.stop_reason, "answered"),
+    )
+    for label, got, want in checks:
+        good = got == want
+        print(f"  {'PASS' if good else 'FAIL'}  {label}（实际 {got!r}）")
+        if not good:
+            failures.append(f"{label}：期望 {want!r}，实际 {got!r}")
+
+    print("\n[6b] 没有依赖关系时不得误延后")
+    plain = _make_agent(
+        [
+            _batched(
+                ("inspect_case", {"case_id": CASE}),
+                ("list_nodule_candidates", {"case_id": CASE}),
+            ),
+            ScriptedClient.say(REAL_ANSWER),
+        ]
+    ).run("查一下编号")
+    good = (
+        len(plain.steps[0].tool_calls) == 2
+        and not plain.steps[0].deferred_calls
+        and plain.stop_reason == "answered"
+    )
+    print(
+        f"  {'PASS' if good else 'FAIL'}  两个无依赖工具应同批执行"
+        f"（执行 {len(plain.steps[0].tool_calls)} 个，延后 {len(plain.steps[0].deferred_calls)} 个）"
+    )
+    if not good:
+        failures.append("无依赖关系的并行调用被误延后了")
+    return failures
+
+
 def main() -> int:
     print("=" * 72)
     print("Agent 循环控制流验证")
@@ -312,6 +407,7 @@ def main() -> int:
     failures += check_correction_happens()
     failures += check_gives_up_honestly()
     failures += check_normal_run_untouched()
+    failures += check_dependency_deferral()
 
     print("\n" + "=" * 72)
     if failures:
@@ -322,7 +418,7 @@ def main() -> int:
     print(
         f"通过：识别器召回 {len(SHOULD_DETECT)}/{len(SHOULD_DETECT)}、"
         f"精度 {len(SHOULD_NOT_DETECT)}/{len(SHOULD_NOT_DETECT)}，"
-        "纠偏 / 如实记账 / 不干扰正常轨迹三条控制流全部符合预期"
+        "纠偏 / 如实记账 / 不干扰正常轨迹 / 依赖延后四条控制流全部符合预期"
     )
     return 0
 

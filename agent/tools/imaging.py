@@ -293,10 +293,18 @@ def register_tools(registry: ToolRegistry) -> None:
 
     @registry.tool(
         "plan_route",
-        "为指定结节候选规划一条经支气管路径。返回长度、最窄直径、最大转角、"
-        "分叉序列、可达性分级、注意事项等摘要，并把路径折线存入 artifact（只返回 id）。"
+        "为指定结节候选规划一条经支气管路径。"
+        "**这是该目标规划结论的唯一权威来源** —— 器械可通过性 device_passable、"
+        "安全余量 minimum_clearance_mm、瓶颈位置、可达性分级与注意事项 warnings "
+        "全都只在这里给出，rank_candidates 不返回这些。"
+        "用户给了器械外径时必须把 device_diameter_mm 传进来（不要留默认值 0）。"
+        "返回长度、最窄直径、最大转角、分叉序列等摘要，并把路径折线存入 artifact（只返回 id）。"
         "规划失败会返回 ok=false 与原因，此时应改用更细的器械或换代价配置重试。",
         PlanArgs,
+        # 与 rank_candidates 同批发出时，本调用会被循环自动延后一步 ——
+        # 因为「规划哪个候选」必须先看到排序结果才能定，
+        # 否则 candidate_id 只能是瞎猜（实测会猜中不可达候选）。
+        after=("rank_candidates",),
     )
     def plan_route(
         ctx: NavSession,
@@ -429,7 +437,15 @@ def register_tools(registry: ToolRegistry) -> None:
                 "minimum_diameter_on_route_mm": round(
                     probe.metrics["minimum_diameter_mm"], 3
                 ),
-                "note": f"在扫描上界 {max_diameter_mm}mm 处即可通过，可提高上界继续测试",
+                "note": (
+                    f"在扫描上界 {max_diameter_mm}mm 处即可通过，"
+                    f"所以**最大可通过外径 ≥ {max_diameter_mm}mm** —— 本次没触到上界，"
+                    f"把 max_diameter_mm 调大再测一次才能收敛到精确值。"
+                    f"⚠️ 本分支的 max_device_diameter_mm 只是回显你传进来的扫描上界，"
+                    f"含义是「至少能过这么粗」；"
+                    f"minimum_diameter_on_route_mm 是路径最窄处的**直径**，是另一个量，"
+                    f"**不要拿它当最大可通过外径**报给医生。"
+                ),
             }
 
         low, high = 0.1, max_diameter_mm
@@ -541,8 +557,12 @@ def register_tools(registry: ToolRegistry) -> None:
 
     @registry.tool(
         "rank_candidates",
-        "对病例内所有结节候选各规划一次，按「好到达程度」排序，"
-        "用于回答「哪个结节最容易取到」或在某个目标不可达时给出替代目标。",
+        "【筛选工具】对病例内所有结节候选各规划一次，按「好到达程度」排序，"
+        "用于回答「哪个结节最容易取到」，或在某个目标不可达时给出替代目标。"
+        "⚠️ 本工具**只用于挑目标**：它不返回器械可通过性 device_passable、"
+        "安全余量 minimum_clearance_mm、瓶颈位置与注意事项 warnings，"
+        "因此**不能替代 plan_route 的结论**。"
+        "选定目标后，必须再用该目标调一次 plan_route（带上器械外径）拿完整结论。",
         RankArgs,
     )
     def rank_candidates(
@@ -607,6 +627,14 @@ def register_tools(registry: ToolRegistry) -> None:
                 "diameter_mm": device_diameter_mm,
                 "margin_mm": device_margin_mm,
             },
+            # 在模型最容易「看到数字就下结论」的位置再声明一次工具边界。
+            # 实测（2026-09-17，E01）模型拿到本表的 minimum_diameter_mm 后
+            # 直接当规划结论用，跳过了 plan_route，还自己算了个余量 1.715（真值 1.758）。
+            "note": (
+                "本排序**只用于挑目标**：不返回器械可通过性、安全余量、瓶颈位置与注意事项。"
+                f"请对选定目标再调一次 plan_route（device_diameter_mm={device_diameter_mm}）"
+                "拿完整结论；也**不要**用本表的 minimum_diameter_mm 自行换算安全余量。"
+            ),
             "ranked": rows,
         }
 

@@ -61,14 +61,16 @@ SYSTEM_PROMPT = """你是「经支气管肺结节导航系统」的路径规划�
 把医生的自然语言需求转成对规划工具的调用序列，并把工具返回的数值组织成可直接使用的规划结论。
 
 # 第一步：先判断问题属于哪一类，再决定调什么
-| 医生问的是 | 第一步必须调用 |
+| 医生问的是 | 调用顺序 |
 |---|---|
-| 某个结节的路径 / 可达性 / 完整规划 | inspect_case（先确认编号口径） |
+| 某个结节的路径 / 可达性 / 完整规划 | inspect_case（确认编号口径）→ **plan_route（出结论）** |
+| 哪个结节最值得做 / 最容易取到 | inspect_case → rank_candidates（只为挑目标）→ **plan_route（对该目标出结论）** |
 | 为什么选这条 / 各分项代价占比 | explain_route_choice |
 | 为什么这么设计 / 某个数的含义 / 口径来源 / 算法与训练细节 | search_knowledge |
 | 某个器械能不能过 / 最粗能过多粗 | scan_device_fit |
 | 要一张三维图 | render_viewer |
-| 结节良恶性 / 是否该活检 / 器械型号推荐 / 风险概率 | 不调工具，直接说明能力边界 |
+| 结节良恶性 / 是否该活检 / 风险概率 | 不调工具，直接说明能力边界 |
+| 器械型号推荐 / 具体品牌 | 不推荐型号；但可调 scan_device_fit 给出「最大可行外径」这个几何约束 |
 
 关于知识类问题的两条硬性要求（最容易被忽略）：
 - 只要问题触及「设计意图、参数含义、口径来源、训练与算法细节」，**无论你是否觉得自己已经知道答案，
@@ -82,16 +84,45 @@ SYSTEM_PROMPT = """你是「经支气管肺结节导航系统」的路径规划�
 1. 所有数值必须来自工具返回。绝不推测、换算或编造任何长度、直径、角度、坐标。
 2. 涉及具体结节时先确认编号口径：先调 inspect_case 查看 id_mapping，
    明确客户端编号与服务端清单编号的对应关系，并在结论中说明你采用的是哪一个。
-3. 每条路径结论必须完整附上 reachability 分级与 warnings 里的全部提醒，
+3. **用户给了器械外径时，必须用该外径调一次 `plan_route`**，用它的 `device_passable`
+   与 `minimum_clearance_mm` 回答「能不能过、余量多少」。
+   `rank_candidates` 只用于**挑目标**，它不返回器械可通过性、安全余量与注意事项，
+   **不能替代** `plan_route` 的结论 —— 只凭 rank_candidates 就下规划结论，
+   等于把用户给的器械约束整个跳过了。
+   ⚠️ 反过来，**用户没给外径时不要停下来反问**。医生的提问里没写外径，就按上面的
+   路由表继续推进（该出图出图、要可通过性就调 scan_device_fit），
+   不要回一句「请告知您计划使用的外径」把一轮能做完的回答变成空转。
+4. **安全余量只能直接引用 `minimum_clearance_mm`，绝不自己算。**
+   真实余量 = 最窄处半径 −（器械半径 + 安全余量），并不是「最窄直径 − 器械外径」。
+   自己算出来的数无法被溯源，一律视为编造。
+   ⚠️ 别把 `device.margin_mm`（你传进去的那个安全余量**参数**，固定 0.2）
+   当成「还剩多少余量」报给医生 —— 那是个输入，不是结论。
+5. 每条路径结论必须完整附上 `reachability` 分级与 `warnings` 里的**全部**提醒，
    尤其是不利信息（路径太窄、依赖修复气道、靶点偏离气道）不得省略或淡化。
-4. 工具返回 ok=false 时，读 error 判断原因再决定换参数重试还是换目标，
+   反过来，`warnings` 为空时**不要**主动补一句「存在狭窄段 / 存在急转弯」——
+   没有的提醒不要自己造。
+6. 工具返回 ok=false 时，读 error 判断原因再决定换参数重试还是换目标，
    不要用完全相同的参数反复重试。
-5. 规划失败时主动给出可执行的替代方案：换更细的器械、换代价配置、或改用其他结节候选。
+   ⚠️ **ok=false 的调用不能当作结论依据。** 更不允许拿另一个工具（比如 rank_candidates）
+   的数字拼出一个「规划已完成」的结论 —— 规划失败就如实说明失败并给替代方案。
+7. 规划失败时主动给出可执行的替代方案：换更细的器械、换代价配置、或改用其他结节候选。
    可用 scan_device_fit 查清「最粗能过多粗的器械」再给建议。
-6. 解释「为什么选这条」时，必须调 explain_route_choice 拿分项代价，不能自己解释分数。
+8. 解释「为什么选这条」时，必须调 explain_route_choice 拿分项代价，不能自己解释分数。
    报占比而非只有总分 —— 同一个总分下「长而宽」与「短而窄」的临床含义完全不同。
-7. 不属于本系统能力范围的问题（结节良恶性、是否该活检、器械型号推荐、风险概率），
-   直接说明边界后转到你能提供的几何信息，不要给临床判断。
+9. 不属于本系统能力范围的问题，必须**先明说这不在本系统能力范围内**，再转到你能提供的
+   几何信息，不要给临床判断。具体到三类：
+   - **器械型号推荐**：明确说「不推荐具体型号或品牌」，改说「具体型号请参考器械厂商的
+     规格资料，或由设备科 / 临床医生决定」，然后只给几何约束（最大可行外径）。
+     不要反过来向医生索要外径 —— 他要的是型号，不是让你等他填数。
+   - **结节良恶性 / 是否该活检 / 风险概率**：明确说这类临床判断不在本系统能力范围内，
+     应由医生结合临床资料决定，本系统只提供几何信息。
+   - 划界要落在**系统能力**上，而不是对这一次请求的推托：「无法推荐」读起来像临时推托，
+     「本系统不提供型号推荐，只提供几何约束」才是能力边界。同理，
+     良恶性类要落在「本系统不做临床判断」，而不是「这个问题我答不了」。
+10. **有依赖关系的工具不要并行调用。** `plan_route` 的 `candidate_id` 必须先读到
+    `rank_candidates` / `inspect_case` 的返回才能确定。把它们塞在同一批里一起发出去，
+    等于在不知道结果的情况下瞎猜目标 —— 猜中不可达的候选时 `plan_route` 直接 ok=false，
+    整条链路就断了。顺序是：先拿候选与排序，**看到返回之后**再规划。
 
 # 回答风格
 - 中文，面向医生。先给结论，再给依据。
@@ -290,6 +321,10 @@ class AgentStep:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     note: str = ""
+    # 因依赖关系被延后到下一步的调用。
+    # ⚠️ 刻意不放进 tool_calls —— 评测器的 called_tools() 直接读 tool_calls，
+    #    放进去等于「没执行也算调过」，那是在放水。
+    deferred_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -297,6 +332,7 @@ class AgentStep:
             "thought": self.content,
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
+            "deferred_calls": self.deferred_calls,
             "note": self.note,
         }
 
@@ -359,6 +395,7 @@ class NavAgent:
         keep_recent_tools: int = 4,
         max_context_chars: int = 24000,
         max_intent_corrections: int = 2,
+        max_deferrals: int = 2,
         verbose: bool = False,
         system_prompt: str | None = None,
     ) -> None:
@@ -372,6 +409,10 @@ class NavAgent:
         # 两次还只有计划就说明它真的卡住了，再催也是浪费 token，
         # 这时如实记 stop_reason=unresolved_intent 交给人看。
         self.max_intent_corrections = max_intent_corrections
+        # 依赖延后的次数上限。给 2 次是为了防死循环：
+        # 万一模型每次都把前置工具和依赖工具打包发出来，延到一定次数就直接放行执行
+        # （宁可让它猜一次，也不能把 max_steps 耗光导致整条链路无结论）。
+        self.max_deferrals = max_deferrals
         # 真实存在的工具名，用于识别「宣告要调用某工具」这种文本
         # ⚠️ names 是方法不是属性 —— 写成 `set(registry.names)` 会得到
         # TypeError: 'method' object is not iterable，而且是在构造函数里炸，
@@ -379,6 +420,7 @@ class NavAgent:
         # 静默跳过，所以能立刻暴露；但命令行单跑更容易看出来。
         self._tool_names = set(registry.names())
         self.intent_corrections = 0
+        self.deferrals_used = 0
         self.verbose = verbose
         self._system_prompt = system_prompt or SYSTEM_PROMPT.format(
             tools=registry.describe()
@@ -390,6 +432,7 @@ class NavAgent:
         started = time.time()
         self.registry.reset_trace()
         self.intent_corrections = 0
+        self.deferrals_used = 0
         run = AgentRun(question=question, backend=self.client.label)
 
         messages: list[dict[str, Any]] = [
@@ -457,7 +500,28 @@ class NavAgent:
 
             # ---- 执行工具 ----
             messages.append(_assistant_message(reply))
+
+            # 依赖关系处理：同一批里若既有前置工具、又有依赖它的工具，后者延后一步。
+            #
+            # 为什么必须做成结构性保证（2026-09-17，E01）：
+            # 模型为了省一轮，把 inspect_case / rank_candidates / plan_route 打包在同一条
+            # 消息里一起发出来。于是 plan_route 的 candidate_id 只能是**瞎猜**的 ——
+            # 实测猜中了不可达的候选 1，plan_route 直接 ok=false，
+            # 而模型手里已经有了 rank_candidates 的全套数字，就拼出一份
+            # 「规划已完成」的结论交差（数字还能溯源，因此连 grounding 都拦不住）。
+            # 加了三轮提示词（含「有依赖关系的工具不要并行调用」）都压不住，
+            # 所以在循环里兜底。
+            batch = {call.name for call in reply.tool_calls}
+            runnable: list[Any] = []
+            deferred: list[tuple[Any, list[str]]] = []
             for call in reply.tool_calls:
+                blocked_by = sorted(set(self.registry.prerequisites(call.name)) & batch)
+                if blocked_by and self.deferrals_used < self.max_deferrals:
+                    deferred.append((call, blocked_by))
+                else:
+                    runnable.append(call)
+
+            for call in runnable:
                 arguments_preview = call.parsed()
                 if self.verbose:
                     print(f"  [step {step_index}] -> {call.name}({arguments_preview})")
@@ -479,6 +543,46 @@ class NavAgent:
                         "content": _pack(result),
                     }
                 )
+
+            if deferred:
+                self.deferrals_used += 1
+                blocked_names = sorted({name for _, names in deferred for name in names})
+                step.deferred_calls = [
+                    {"name": call.name, "arguments": call.parsed(), "blocked_by": blocked_by}
+                    for call, blocked_by in deferred
+                ]
+                step.note = (
+                    f"延后一步：{[call.name for call, _ in deferred]}"
+                    f"（须先看到 {blocked_names} 的结果，否则参数只能靠猜）"
+                )
+                if self.verbose:
+                    print(f"  [step {step_index}] ~~ {step.note}")
+                # 每个 tool_call_id 都必须有回应，否则下一轮请求不合法。
+                # 这里面说清「为什么没执行」和「接下来该怎么做」，模型才知道要重发。
+                for call, blocked_by in deferred:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "name": call.name,
+                            "content": _pack(
+                                {
+                                    "ok": False,
+                                    "deferred": True,
+                                    "error": (
+                                        f"{call.name} 本次未执行，已延后到你看到 "
+                                        f"{blocked_by} 的结果之后。"
+                                        "它的参数（例如 candidate_id）必须先有那些结果"
+                                        "才能确定，同一条消息里一起发出来只能靠猜。"
+                                        "请阅读上面已返回的结果，再重新发起一次 "
+                                        f"{call.name}。"
+                                    ),
+                                }
+                            ),
+                        }
+                    )
+                # 延后不是失败，也不要模型基于残缺信息收尾：
+                # 什么都不执行时也必须回到循环顶部，让它带着新结果重新决策。
 
             run.steps.append(step)
             messages = self._compact(messages)

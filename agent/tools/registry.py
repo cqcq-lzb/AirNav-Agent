@@ -24,12 +24,26 @@ from pydantic import BaseModel, ValidationError
 
 @dataclass
 class ToolSpec:
-    """一个可被 LLM 调用的工具。"""
+    """一个可被 LLM 调用的工具。
+
+    `after` 声明「必须先看到哪些工具的结果，本工具才有意义」。
+    它解决的是一个真实缺陷（2026-09-17，E01）：模型为了省一轮，
+    把 `inspect_case` / `rank_candidates` / `plan_route` 打包在同一条消息里
+    一起发出来 —— 于是 `plan_route` 的 `candidate_id` 只能是**瞎猜**的。
+    实测它猜中了一个不可达的候选，`plan_route` 直接 ok=false；
+    模型随后拿 rank_candidates 的数字拼出一份「规划已完成」的结论。
+
+    提示词压不住这个行为（模型手里已经有全套数字，不觉得还需要再调）。
+    所以改成结构性保证：**同一批里出现了 `after` 里的工具时，本工具自动延后一步执行。**
+    这样模型一定会先看到排序结果，再决定规划哪个候选。
+    """
 
     name: str
     description: str
     model: type[BaseModel]
     handler: Callable[..., dict[str, Any]]
+    # 空元组表示无前置依赖，可以和其他工具并行调用
+    after: tuple[str, ...] = ()
 
     def json_schema(self) -> dict[str, Any]:
         """转成 OpenAI function-calling 的参数 schema。"""
@@ -137,12 +151,18 @@ class ToolRegistry:
         name: str,
         description: str,
         model: type[BaseModel],
+        after: tuple[str, ...] = (),
     ) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
         def decorator(fn: Callable[..., dict[str, Any]]):
-            self.register(ToolSpec(name, description, model, fn))
+            self.register(ToolSpec(name, description, model, fn, after))
             return fn
 
         return decorator
+
+    def prerequisites(self, name: str) -> tuple[str, ...]:
+        """该工具声明的前置工具；未注册的名字返回空元组。"""
+        spec = self._tools.get(name)
+        return spec.after if spec else ()
 
     # ---- 查询 ----
 
