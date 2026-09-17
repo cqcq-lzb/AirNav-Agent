@@ -42,6 +42,11 @@
      - `_addresses_user` —— 「请/您/您可以/建议 + 调用 X」是在指挥用户，放过。
 4. **工具失败自愈**：工具的异常被注册表兜住并转成 {"ok": false, "error": ...}，
    模型有机会读到错误、改参数重试。这是 Agent 比单次调用强的地方。
+5. **步进事件回调**（`on_event`，默认 None）：把每一步发生的事推给外部观察者。
+   网页版（`agent/web/server.py`）靠它做实时 SSE —— 浏览器能看到工具一个个跑起来、
+   哪一步被延后、纠偏触发了几次。默认 None 时零介入、零开销，
+   CLI 与评测路径完全不受影响；回调抛异常也会被 `_emit` 吞掉，
+   因为**观测层不该有能力弄坏控制流**。
 """
 from __future__ import annotations
 
@@ -49,7 +54,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .llm.client import ChatReply, LLMError, OpenAICompatClient, ScriptedClient
 from .tools.registry import ToolRegistry
@@ -398,6 +403,8 @@ class NavAgent:
         max_deferrals: int = 2,
         verbose: bool = False,
         system_prompt: str | None = None,
+        environment_note: str = "",
+        on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -422,9 +429,36 @@ class NavAgent:
         self.intent_corrections = 0
         self.deferrals_used = 0
         self.verbose = verbose
-        self._system_prompt = system_prompt or SYSTEM_PROMPT.format(
-            tools=registry.describe()
-        )
+        # 步进事件回调。**默认 None = 完全不介入** ——
+        # CLI 与评测路径一行都不受影响，也不会多出任何开销。
+        # 网页版（`agent/web/server.py`）用它把每一步实时推给浏览器：
+        # Agent 是同步阻塞的，所以服务端把它放进后台线程，
+        # 事件经 asyncio.Queue 转发成 SSE。
+        #
+        # ⚠️ 观测层绝不能拖垮主流程：`_emit` 会吞掉回调抛出的任何异常。
+        # 浏览器断开、前端写错字段，都不该让一次已经算对的规划失败。
+        self.on_event = on_event
+        # 「这台 Agent 正跑在什么界面里」。网页版用它告诉模型：
+        # 出图之后系统会自己把三维视图做成卡片放在界面右侧，
+        # **不要再往回答里贴本地文件路径** —— 浏览器点不开 `D:\...\x.html`，
+        # 那是命令行场景才需要的交代。默认空串，CLI / 评测完全不受影响。
+        base_prompt = system_prompt or SYSTEM_PROMPT.format(tools=registry.describe())
+        if environment_note:
+            base_prompt = f"{base_prompt}\n\n# 运行环境\n{environment_note.strip()}\n"
+        self._system_prompt = base_prompt
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        """把一步事件推给外部观察者（没有观察者就直接返回）。
+
+        刻意吞异常：事件通道是**观测层**，不是控制流。
+        前端断开连接、回调里写错字段，都不应该让 Agent 本身失败。
+        """
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception:  # noqa: BLE001 —— 见上面注释，这里就是要全吞
+            pass
 
     # ------------------------------------------------------------ 主循环
 
@@ -439,6 +473,14 @@ class NavAgent:
             {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": question},
         ]
+        self._emit(
+            {
+                "type": "start",
+                "question": question,
+                "backend": self.client.label,
+                "max_steps": self.max_steps,
+            }
+        )
 
         for step_index in range(1, self.max_steps + 1):
             step = AgentStep(index=step_index)
@@ -450,6 +492,7 @@ class NavAgent:
             except LLMError as error:
                 run.stop_reason = f"llm_error: {error}"
                 run.answer = f"模型调用失败：{error}"
+                self._emit({"type": "error", "message": str(error)})
                 break
 
             _merge_usage(run.usage, reply.usage)
@@ -470,6 +513,15 @@ class NavAgent:
                         )
                         if self.verbose:
                             print(f"  [step {step_index}] !! {step.note}")
+                        self._emit(
+                            {
+                                "type": "correction",
+                                "kind": "intent",
+                                "step": step_index,
+                                "count": self.intent_corrections,
+                                "note": step.note,
+                            }
+                        )
                         # 把它自己的话放回上下文，模型才知道我们在纠正什么
                         messages.append({"role": "assistant", "content": text})
                         messages.append({"role": "user", "content": _INTENT_CORRECTION})
@@ -486,6 +538,14 @@ class NavAgent:
 
                 # 空回复：既没内容也没工具调用，纠偏一次
                 step.note = "空回复，已注入纠偏提示"
+                self._emit(
+                    {
+                        "type": "correction",
+                        "kind": "empty",
+                        "step": step_index,
+                        "note": step.note,
+                    }
+                )
                 messages.append(
                     {
                         "role": "user",
@@ -526,6 +586,17 @@ class NavAgent:
                 if self.verbose:
                     print(f"  [step {step_index}] -> {call.name}({arguments_preview})")
 
+                # 先发「开始」再发「完成」：网页版靠这一对把卡片渲染成
+                # running → ok/fail，否则一次规划里几个工具会一起冒出来。
+                self._emit(
+                    {
+                        "type": "tool_start",
+                        "step": step_index,
+                        "name": call.name,
+                        "arguments": arguments_preview,
+                    }
+                )
+                _tool_started = time.time()
                 result = self.registry.execute(
                     call.name, call.arguments, context=self.session, step=step_index
                 )
@@ -534,6 +605,16 @@ class NavAgent:
                 )
                 step.tool_results.append(
                     {"name": call.name, "ok": result.get("ok", False)}
+                )
+                self._emit(
+                    {
+                        "type": "tool_done",
+                        "step": step_index,
+                        "name": call.name,
+                        "ok": bool(result.get("ok", False)),
+                        "elapsed_ms": int((time.time() - _tool_started) * 1000),
+                        "error": result.get("error"),
+                    }
                 )
                 messages.append(
                     {
@@ -557,6 +638,15 @@ class NavAgent:
                 )
                 if self.verbose:
                     print(f"  [step {step_index}] ~~ {step.note}")
+                self._emit(
+                    {
+                        "type": "deferred",
+                        "step": step_index,
+                        "names": [call.name for call, _ in deferred],
+                        "blocked_by": blocked_names,
+                        "note": step.note,
+                    }
+                )
                 # 每个 tool_call_id 都必须有回应，否则下一轮请求不合法。
                 # 这里面说清「为什么没执行」和「接下来该怎么做」，模型才知道要重发。
                 for call, blocked_by in deferred:
@@ -608,6 +698,21 @@ class NavAgent:
             }
             for call in self.registry.calls
         ]
+        # 收尾事件只发一次，把渲染统计栏要用的东西一并带上。
+        # （不放循环内部发：answer 有「正常回答」和「max_steps 兜底总结」两条来路，
+        #  在两处各发一次迟早会重复或漏掉一条。）
+        self._emit(
+            {
+                "type": "final",
+                "answer": run.answer,
+                "stop_reason": run.stop_reason,
+                "elapsed_s": round(run.elapsed_s, 2),
+                "steps": len(run.steps),
+                "tool_calls": run.tool_call_count,
+                "intent_corrections": run.intent_corrections,
+                "usage": run.usage,
+            }
+        )
         return run
 
     # ------------------------------------------------------------ 上下文管理
