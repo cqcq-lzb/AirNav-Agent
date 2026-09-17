@@ -46,6 +46,7 @@ const block = html.slice(start, end);
 // 产物登记表：文件名 -> URL。真实运行时由 renderArtifacts 填。
 const artByName = {
   "viewer_LIDC_0089_c3.html": "/artifacts/viewer_LIDC_0089_c3.html",
+  "viewer_LIDC_0089_c3_d1.5.html": "/artifacts/viewer_LIDC_0089_c3_d1.5.html",
   "viewer_LIDC_0089_c1.html": "/artifacts/viewer_LIDC_0089_c1.html",
 };
 
@@ -208,9 +209,25 @@ const kept = markArtifacts(unknown);
 check(kept.includes("other_view.html") && kept.includes("missing.html"), "未登记的路径保持原样");
 check(!kept.includes("\u0001"), "不产生占位符残留");
 
+// ---------------------------------------------------------------- 用例 9
+// 2026-09-17 新口径的实测形态：`plan_route` 顺带出图之后，空模型（真实 qwen2.5:14b）
+// 写的是 `[三维视图](D:\...\viewer_LIDC_0089_c3_d1.5.html)` ——
+// 链接文字**不是**路径，路径还带上了器械外径后缀。两者都不能让替换失效。
+console.log("\n[9] `[三维视图](带外径后缀的路径)` —— 规划顺带出图后的实测形态");
+const out9 = md(
+  "**三维视图**：已生成，路径详情请查看 " +
+    "[三维视图](D:\\AirNav-Agent\\outputs\\viewers\\viewer_LIDC_0089_c3_d1.5.html)。"
+);
+check(
+  out9.includes('data-open="/artifacts/viewer_LIDC_0089_c3_d1.5.html"'),
+  "带参数后缀的产物也能认出来"
+);
+check(countButtons(out9) === 1, "一个按钮", countButtons(out9) + " 个按钮");
+check(!out9.includes("D:\\"), "路径不残留");
+
 console.log("\n" + "=".repeat(68));
 console.log(failures ? `未通过：${failures} 项` : "全部通过");
-for (const [i, out] of [out1, out2, out3, out4, out5, out6, out7].entries()) {
+for (const [i, out] of [out1, out2, out3, out4, out5, out6, out7, out9].entries()) {
   console.log(`\n[${i + 1}] 替换后的片段：`);
   const lines = out
     .split("<br>")
