@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,9 +47,12 @@ def add_common_options(parser: argparse.ArgumentParser, suppress: bool = False) 
     d = argparse.SUPPRESS if suppress else None
     parser.add_argument(
         "--backend",
-        default=d if suppress else "ollama",
+        # 默认后端允许用环境变量给，这样启动脚本能把默认值统一改掉，
+        # 而不必改代码：对话Agent.bat 里设 AIRNAV_DEFAULT_BACKEND=gpu41。
+        # 显式写 --backend xxx 优先级仍然最高 —— argparse 的 default 只在缺省时生效。
+        default=d if suppress else (os.environ.get("AIRNAV_DEFAULT_BACKEND") or "ollama"),
         choices=list(PRESETS) + ["scripted"],
-        help="LLM 后端，默认本地 ollama",
+        help="LLM 后端，默认本地 ollama（可用 AIRNAV_DEFAULT_BACKEND 覆盖）",
     )
     parser.add_argument("--model", default=d, help="覆盖默认模型名")
     parser.add_argument("--base-url", default=d, help="覆盖默认 base_url")

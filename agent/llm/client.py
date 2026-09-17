@@ -73,9 +73,14 @@ PRESETS: dict[str, dict[str, Any]] = {
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
-        "model": "qwen2.5:7b",
+        # ⚠️ 默认模型必须挑本机**真的装了**的那个。
+        # 本机 ollama 里只有 qwen2.5:14b（8.99 GB），没有 7b ——
+        # 默认写 7b 的话 `--backend ollama` 开箱即 HTTP 404 model not found，
+        # 而 14b 实测跑得动（本地一次「2.0mm 器械可通过性」6.4s）。
+        # 如果你的机器上是别的模型，用 `--model` 或 `ollama pull` 对齐。
+        "model": "qwen2.5:14b",
         "api_key": "ollama",
-        "label": "本地 Ollama（qwen2.5:7b，免费、无需联网）",
+        "label": "本地 Ollama（免费、无需联网）",
     },
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
@@ -165,11 +170,24 @@ class OpenAICompatClient:
                 f"后端 {name} 需要 API Key，请设置环境变量 {preset['env_key']}"
                 f"或用 --api-key 传入"
             )
+        # label 一律带上**实际生效**的模型名。
+        # 缓存踩过的坑：原来把模型名写死在预设的 label 里，于是
+        #   --backend ollama --model qwen2.5:14b
+        # 明明用的是 14b，打印出来却是「本地 Ollama（qwen2.5:7b…）」——
+        # 排错时会被这个标签带偏，以为模型没生效。
+        effective_model = model or default_model
+        template = preset.get("label", name)
+        label = (
+            template.format(model=effective_model)
+            if "{model}" in template
+            else f"{template} · {effective_model}"
+        )
+
         return cls(
             base_url=base_url or default_url,
-            model=model or default_model,
+            model=effective_model,
             api_key=key or preset.get("api_key"),
-            label=preset.get("label", name),
+            label=label,
             **kwargs,
         )
 

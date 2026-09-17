@@ -8,8 +8,8 @@
     # 只跑某几类
     python -m agent.scripts.run_eval --backend heuristic --include 边界拒答 --include 分项归因
 
-    # 真实模型（本地 Ollama）
-    python -m agent.scripts.run_eval --backend ollama --model qwen2.5:7b --timeout 180
+    # 真实模型（本地 Ollama；默认模型见 PRESETS，与本机已装的对齐）
+    python -m agent.scripts.run_eval --backend ollama --timeout 180
 
     # 云端
     python -m agent.scripts.run_eval --backend deepseek --api-key $DEEPSEEK_API_KEY
