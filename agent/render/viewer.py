@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,10 @@ from .template import render_html
 # 默认输出目录（相对项目根）
 DEFAULT_OUTPUT_DIR = "outputs/viewers"
 
+# 只匹配**字面量**里的时间戳。
+# 模板里还有一处 `P.meta.generatedAt`，那是读对象的 JS 引用，不带引号，不会被误伤。
+_TS_RE = re.compile(r'("generatedAt"\s*:\s*)"[^"]*"')
+
 
 @dataclass
 class ViewerOutput:
@@ -25,6 +32,8 @@ class ViewerOutput:
     sidecar: Path
     payload: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # 目标文件已存在、且内容与本次渲染**除时间戳外完全相同**，于是没有重写。
+    reused: bool = False
 
     @property
     def size_mb(self) -> float:
@@ -52,7 +61,29 @@ class ViewerOutput:
 
 
 def _output_root() -> Path:
+    """viewer 落盘根目录，可用 `AIRNAV_VIEWER_DIR` 改写。
+
+    `outputs/viewers` 里那几份 HTML 是**入了库的演示产物**（.gitignore 明确放行）。
+    自检与评测也走 render_viewer，但它们只是要验证链路通不通 —— 参数与演示那几份
+    不同（器械外径、mesh_step），于是每跑一次回归就把入库的产物重渲染一遍，
+    在工作区留下一处与源码无关的改动。所以自检/评测一律改成写临时目录，
+    见 `use_scratch_output()`。
+    """
+    override = os.environ.get("AIRNAV_VIEWER_DIR")
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR
+
+
+def use_scratch_output(tag: str = "selftest") -> Path:
+    """把**本进程**的 viewer 输出改到临时目录，并返回该目录。
+
+    自检与评测入口应当在开始渲染之前调用它。这样 `outputs/viewers` 里那份
+    已入库的演示产物就只会在**人手跑演示**时被写。
+    """
+    root = Path(tempfile.mkdtemp(prefix=f"airnav_{tag}_"))
+    os.environ["AIRNAV_VIEWER_DIR"] = str(root)
+    return root
 
 
 def warnings_for(case: CaseContext, plan: RoutePlan, device_diameter_mm: float) -> list[str]:
@@ -118,6 +149,80 @@ def warnings_for(case: CaseContext, plan: RoutePlan, device_diameter_mm: float) 
     return notes
 
 
+# ------------------------------------------------------------------ 产物命名
+
+
+def _param_tag(
+    device_diameter_mm: float | None, profile: str | None, mesh_step: int
+) -> str:
+    """把**会影响视图内容**的参数压成文件名后缀。
+
+    只编码这三个：器械外径（决定器械管与余量着色）、代价配置（决定走的是哪条路）、
+    网格步长（决定气道表面精度）。安全余量这类固定值不入名，免得名字失控。
+    """
+    parts: list[str] = []
+    device = float(device_diameter_mm or 0.0)
+    if device > 0:
+        parts.append(f"d{device:g}")
+    if profile and str(profile) != "balanced":
+        parts.append(str(profile))
+    if int(mesh_step) != 1:
+        parts.append(f"s{int(mesh_step)}")
+    return "_" + "_".join(parts) if parts else ""
+
+
+def _auto_filename(
+    case_id: str,
+    candidate_id: int,
+    device_diameter_mm: float | None,
+    profile: str | None,
+    mesh_step: int,
+    target_dir: Path,
+) -> str:
+    """`viewer_<病例>_c<候选>[_d<外径>][_<档>][_s<步长>].html`
+
+    为什么参数要进文件名：旧口径 `viewer_LIDC_0089_c3.html` 只编码「病例 + 候选」，
+    于是同一个结节用 1.5 mm 和 2.0 mm 各渲染一次会**互相覆盖** ——
+    后渲染的顶掉先渲染的，用户点开看到的器械尺寸未必是他问的那个。
+
+    为什么还认旧名字：`outputs/viewers/` 里入库的那两份演示产物就是旧口径。
+    统一改名等于在 git 里删两个、再加两个 1.8 MB 的文件（仓库会胖一圈），
+    为了命名整齐不值得。所以旧文件只要 sidecar 里记的参数与本次一致就继续用，
+    参数对不上才启用带后缀的新名字。
+    """
+    base = f"viewer_{case_id}_c{candidate_id}"
+    tag = _param_tag(device_diameter_mm, profile, mesh_step)
+    if not tag:
+        return f"{base}.html"
+    if _legacy_params_match(
+        target_dir / f"{base}.json", device_diameter_mm, profile, mesh_step
+    ):
+        return f"{base}.html"
+    return f"{base}{tag}.html"
+
+
+def _legacy_params_match(
+    sidecar: Path,
+    device_diameter_mm: float | None,
+    profile: str | None,
+    mesh_step: int,
+) -> bool:
+    """旧命名的 sidecar 里记的参数，是否与本次渲染完全一致。"""
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8")).get("meta") or {}
+        return (
+            abs(
+                float(meta.get("deviceDiameterMm", -1.0))
+                - float(device_diameter_mm or 0.0)
+            )
+            < 1e-6
+            and str(meta.get("profile") or "balanced") == str(profile or "balanced")
+            and int(meta.get("meshStep", 1)) == int(mesh_step)
+        )
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
 def render_case_viewer(
     case: CaseContext,
     plan: RoutePlan,
@@ -149,20 +254,47 @@ def render_case_viewer(
 
     target_dir = Path(output_dir) if output_dir else _output_root()
     target_dir.mkdir(parents=True, exist_ok=True)
-    name = filename or f"viewer_{case.case_id}_c{plan.candidate_id}.html"
+    name = filename or _auto_filename(
+        case.case_id,
+        plan.candidate_id,
+        device_diameter_mm,
+        payload.get("meta", {}).get("profile"),
+        mesh_step,
+        target_dir,
+    )
     path = target_dir / name
-    path.write_text(html, encoding="utf-8")
+
+    # 两重去重叠加，各自解决一个问题：
+    # ① 命名（见 `_auto_filename`）—— 参数进了文件名，不同器械外径不再互相覆盖；
+    # ② 内容（下面这几行）—— 同一组参数重渲染时只有 generatedAt 会变，
+    #    那就干脆不写盘，免得每跑一次演示就在 `git status` 里留一条「只差一个时间戳」。
+    # 代价是 generatedAt 的语义变成「这份视图的**内容**最后一次变化的时刻」，
+    # 而不是「最后一次渲染的时刻」（工具层会用 viewer_reused 如实告诉模型）。
+    reused = _same_content(html, path)
+    if not reused:
+        path.write_text(html, encoding="utf-8")
 
     sidecar = _write_sidecar(payload, path)
-    return ViewerOutput(path=path, sidecar=sidecar, payload=payload, warnings=notes)
+    return ViewerOutput(
+        path=path, sidecar=sidecar, payload=payload, warnings=notes, reused=reused
+    )
+
+
+def _same_content(new_text: str, old_path: Path) -> bool:
+    """旧文件与本次要写的内容是否等价（忽略 generatedAt 时间戳）。"""
+    try:
+        old_text = old_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _TS_RE.sub(r"\1", new_text) == _TS_RE.sub(r"\1", old_text)
 
 
 def _write_sidecar(payload: dict[str, Any], html_path: Path) -> Path:
     """同时落一份纯 JSON，便于脚本或其它前端复用同一批数据。"""
     data_path = html_path.with_suffix(".json")
-    data_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
-    )
+    text = json.dumps(payload, ensure_ascii=False, indent=1)
+    if not _same_content(text, data_path):
+        data_path.write_text(text, encoding="utf-8")
     return data_path
 
 
@@ -199,5 +331,6 @@ __all__ = [
     "ViewerOutput",
     "render_case_viewer",
     "render_from_case_id",
+    "use_scratch_output",
     "warnings_for",
 ]

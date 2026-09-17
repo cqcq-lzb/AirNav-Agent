@@ -300,9 +300,10 @@ def register_tools(registry: ToolRegistry) -> None:
         "全都只在这里给出，rank_candidates 不返回这些。"
         "用户给了器械外径时必须把 device_diameter_mm 传进来（不要留默认值 0）。"
         "返回长度、最窄直径、最大转角、分叉序列等摘要。"
-        "⚠️ 本工具**不产出任何可查看的文件**（折线只在内存里）——"
-        "**不要在回答里写「三维视图已生成」或给出任何链接/ID**。"
-        "要出三维视图必须另外调用 render_viewer。"
+        "**规划成功时三维视图已随本次规划渲染好**，就在 viewer_path 里 ——"
+        "把它原样写进回答即可，这次说「三维视图已生成」是真的；"
+        "不要复述视图里的数字，也不必为同一目标再调 render_viewer。"
+        "（viewer_error 非空说明这次没出成图，那就如实说没出图，别许诺链接。）"
         "规划失败会返回 ok=false 与原因，此时应改用更细的器械或换代价配置重试。",
         PlanArgs,
         # 与 rank_candidates 同批发出时，本调用会被循环自动延后一步 ——
@@ -352,25 +353,8 @@ def register_tools(registry: ToolRegistry) -> None:
             "route": _route_block(plan),
             "baseline_comparison": baseline,
             "warnings": _warnings(plan, baseline_note),
-            # ⚠️ 这里**不能**出现任何像链接、像句柄的东西。
-            #
-            # 2026-09-17 实测的缺陷：旧版返回的是
-            #     "artifact_id": "route-001",
-            #     "artifact_note": "路径折线数据已存入 artifact，渲染三维视图时用 render_viewer 引用该 id"
-            # 两句都不成立 —— render_viewer 的入参是 case_id / candidate_id，**不吃 id**；
-            # 而且本工具**根本没有产出任何文件**。模型照字面复述成了
-            #     「三维路径可视化文件已生成，路径折线数据已存入 artifact，ID 为 route-001」
-            #     以及 markdown 死链 `![](route-001)`
-            # 两句话都是假的，用户点了个空。
-            #
-            # 根因不是提示词 —— 是**返回体本身在诱导**。模型只是把手里有的字段说出来，
-            # 跟 E01「并行盲调」是同一条教训：**提示词压不住数据，要改的是数据。**
-            # 所以这里既不给 id，也不给任何可被当成链接的字段，只给一句正确且可执行的说明。
-            "note": (
-                "本工具只返回数值结果，**不产出任何可查看的文件**"
-                "（路径折线数据只存在内部，没有 URL、不能点击）。"
-                "需要三维视图请调用 render_viewer，它会生成可直接打开的单文件 HTML。"
-            ),
+            # 三维视图随规划一起给 —— 见 `_auto_view` 里记的现场。
+            **_auto_view(ctx, case, plan, device_diameter_mm),
         }
 
     @registry.tool(
@@ -732,6 +716,9 @@ def register_tools(registry: ToolRegistry) -> None:
             # viewer_path 会被命令行场景直接交代给用户；
             # 网页版则在前端把本地路径就地换成可点按钮（见 agent/web/static/index.html）。
             "viewer_file": Path(output.path).name,
+            # 同一路径用同一批参数再渲染一次时不会重写文件（内容只差 generatedAt），
+            # 这里如实说明，免得模型把「复用了旧文件」讲成「刚刚重新生成了」。
+            "viewer_reused": output.reused,
             "mesh_step": mesh_step,
             "contents": [
                 "气道表面（半透明，可剖切）",
@@ -753,6 +740,80 @@ def register_tools(registry: ToolRegistry) -> None:
                 "把 viewer_path 原样给用户即可，不需要复述里面的数字。"
             ),
         }
+
+
+def _auto_view(
+    ctx: NavSession,
+    case: Any,
+    plan: Any,
+    device_diameter_mm: float,
+) -> dict[str, Any]:
+    """规划成功时顺带把三维视图渲染出来，让回答里的链接**是真的**。
+
+    ## 现场的两种修法
+
+    2026-09-17 用户实测的回答结尾是：
+
+        三维路径可视化文件已生成，路径折线数据已存入 artifact，ID 为 route-001。
+        如需查看路径的三维可视化，请点击下方链接：
+        ![](route-001)          ← 用户回了一句「连接呢」
+
+    点不开，因为模型手里根本没有文件 —— `route-001` 只是个内部留痕 id。
+    当时能走两条路：**别许诺**，或者**让许诺成真**。
+
+    第一轮先走了「别许诺」（删掉 artifact_id、写一句「不产出任何可查看的文件」），
+    结果模型老实了，但用户想要的东西还是没有：问一条路径，拿回一段文字。
+    这说明真正的问题是**交付形态**，不是措辞 —— 规划结论和三维视图本来就该一起来。
+
+    所以现在改成让许诺成真：规划成功就把视图渲染好，`viewer_path` 是磁盘上真实的
+    单文件 HTML。模型照着念，用户点得开；网页版还会把它就地渲染成按钮
+    （`agent/web/static/index.html` 的 markArtifacts）。
+
+    ## 几处刻意的取舍
+
+    - **不让渲染失败拖垮规划**：出图依赖 mesh 构建（skimage / scipy），
+      而规划结论本身与它无关。失败就只记 `viewer_error`，并把「没出成图」写清楚，
+      免得模型又凭 viewer_path 的存在去许诺。
+    - **固定 mesh_step=1**：与 `outputs/viewers/` 那份入库演示产物同精度，
+      同一组参数再跑演示会命中内容去重（`viewer_reused`），不产生无谓的 diff。
+    - **`viewer_path` 而不是 artifact id**：没有任何工具吃 id 入参，
+      给出去只会被模型写成死链。
+    """
+    try:
+        from ..render.viewer import render_case_viewer
+
+        output = render_case_viewer(case, plan, device_diameter_mm, mesh_step=1)
+    except Exception as exc:  # noqa: BLE001 - 出图失败不该让规划结论失败
+        return {
+            "viewer_path": None,
+            "viewer_error": f"{type(exc).__name__}: {exc}",
+            "viewer_note": (
+                "本次三维视图渲染失败，**没有生成任何文件**。"
+                "回答里如实说明没出图，不要给出链接。"
+            ),
+        }
+
+    # 登记进 artifacts，供网页版的产物列表使用（同一份折线已在上面 put 过 route）。
+    ctx.artifacts.put(
+        "viewer",
+        str(output.path),
+        meta={
+            "case_id": case.case_id,
+            "candidate_id": plan.candidate_id,
+            "path": str(output.path),
+            "size_mb": round(output.size_mb, 2),
+        },
+    )
+    return {
+        "viewer_path": str(output.path),
+        "viewer_file": Path(output.path).name,
+        "viewer_reused": output.reused,
+        "viewer_note": (
+            "三维视图已随本次规划渲染完成，把 viewer_path 原样交给用户即可 ——"
+            "网页版会显示成可点开的按钮，命令行场景它本身就是一份离线可打开的 HTML。"
+            "不要复述视图里的数字。"
+        ),
+    }
 
 
 def _open_in_browser(path) -> bool:

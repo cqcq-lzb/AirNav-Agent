@@ -82,7 +82,11 @@ def main() -> int:
             profile="balanced",
             device_diameter_mm=2.0,
             device_margin_mm=0.2,
-            mesh_step=2,  # 脚本化验证走粗网格，控制体积与耗时
+            # 与 `outputs/viewers/` 里那份**入库的演示产物**保持同一组参数
+            # （2.0 mm / balanced / step 1）。渲染层对「只有 generatedAt 不同」
+            # 的重复渲染不写盘，所以跑演示不会把入库产物改脏。
+            # 以前这里是 step=2，唯一后果就是每次 demo 都把入库那份换成粗网格版。
+            mesh_step=1,
         )
 
     replies = [

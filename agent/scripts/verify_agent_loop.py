@@ -398,6 +398,13 @@ def check_dependency_deferral() -> list[str]:
 
 
 def main() -> int:
+    # 第 6 层会真的执行一次 plan_route，而 plan_route 现在**顺带渲染三维视图**
+    # （见 agent/tools/imaging.py 的 `_auto_view`）。控制流自检不该往
+    # `outputs/viewers` 里丢产物 —— 那里放的是入库的演示 HTML。
+    from agent.render.viewer import use_scratch_output
+
+    use_scratch_output("verify_agent_loop")
+
     print("=" * 72)
     print("Agent 循环控制流验证")
     print("=" * 72)

@@ -145,6 +145,14 @@ def _make_client_factory(args):
 def main() -> int:
     args = build_parser().parse_args()
 
+    # 评测用例里有「必须出图」那一类（E05），它会真的渲染 HTML。渲染默认落在
+    # outputs/viewers —— 那是**入库的演示产物**目录（2.0 mm / step 1 那一份），
+    # 被评测用的参数覆盖掉之后，跑一次评测就在工作区留下无关改动。改到临时目录。
+    from agent.render.viewer import use_scratch_output
+
+    scratch = use_scratch_output("run_eval")
+    print(f"渲染输出改到临时目录：{scratch}")
+
     # ---- 合并模式：不跑用例，只把分片报告合成完整报告 ----
     if args.merge:
         report = merge_reports(args.merge)
