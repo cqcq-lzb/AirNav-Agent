@@ -107,8 +107,32 @@ check(
 );
 
 // ---------------------------------------------------------------- 用例 3
+// 真模型另一次实测：图片语法**带 alt 文本** `![三维视图](路径)`
+// （空 alt 的 `![](路径)` 上是同位体，但 alt 有内容时 `[^\]]*` 才真正被走到）
+console.log("\n[3] `![alt](路径)` —— 图片语法带 alt 文本（真模型实测）");
+const answer3 =
+  "这是 LIDC_0089 病例中候选 3 的三维视图：\n\n" +
+  "- **气道表面**：半透明，可剖切\n" +
+  "- **中心线**：包含分叉点层级\n\n" +
+  "请注意，本视图为工程研究演示结果，不用于临床诊断与治疗决策。\n" +
+  "![三维视图](D:\\AirNav-Agent\\outputs\\viewers\\viewer_LIDC_0089_c3.html)";
+const out3 = md(answer3);
+const line3 = out3.split("<br>").find((l) => l.includes("inline-art")) || "";
+check(!out3.includes("D:\\"), "回答里不再残留 Windows 路径");
+check(
+  line3.trim() ===
+    '<button type="button" class="inline-art" data-open="/artifacts/viewer_LIDC_0089_c3.html"' +
+      ' data-name="viewer_LIDC_0089_c3.html">打开三维视图</button>',
+  "该行只剩按钮（`!` 与 alt 文本都没有残留）",
+  JSON.stringify(line3.slice(0, 60))
+);
+check(out3.includes('data-open="/artifacts/viewer_LIDC_0089_c3.html"'), "按钮指向正确的产物 URL");
+check(countButtons(out3) === 1, "只产生一个按钮", countButtons(out3) + " 个按钮");
+check(out3.includes("<li><strong>气道表面</strong>：半透明，可剖切</li>"), "列表与粗体仍正常渲染");
+
+// ---------------------------------------------------------------- 用例 4
 // 反向：产物不在登记表里时不能乱改，也不能留下占位符
-console.log("\n[3] 反向用例 —— 未登记的路径");
+console.log("\n[4] 反向用例 —— 未登记的路径");
 const unknown = "见 [x](D:\\somewhere\\other_view.html) 和 ![](D:\\somewhere\\missing.html)";
 const kept = markArtifacts(unknown);
 check(kept.includes("other_view.html") && kept.includes("missing.html"), "未登记的路径保持原样");
@@ -116,8 +140,8 @@ check(!kept.includes("\u0001"), "不产生占位符残留");
 
 console.log("\n" + "=".repeat(68));
 console.log(failures ? `未通过：${failures} 项` : "全部通过");
-console.log("\n[1] 替换后的片段：");
-console.log(out1.split("<br>").filter((l) => l.includes("button")).join("\n"));
-console.log("\n[2] 替换后的片段：");
-console.log(out2.split("<br>").filter((l) => l.includes("button")).join("\n"));
+for (const [i, out] of [out1, out2, out3].entries()) {
+  console.log(`\n[${i + 1}] 替换后的片段：`);
+  console.log(out.split("<br>").filter((l) => l.includes("button")).join("\n"));
+}
 process.exit(failures ? 1 : 0);
