@@ -73,12 +73,23 @@ PRESETS: dict[str, dict[str, Any]] = {
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
-        # ⚠️ 默认模型必须挑本机**真的装了**的那个。
-        # 本机 ollama 里只有 qwen2.5:14b（8.99 GB），没有 7b ——
-        # 默认写 7b 的话 `--backend ollama` 开箱即 HTTP 404 model not found，
-        # 而 14b 实测跑得动（本地一次「2.0mm 器械可通过性」6.4s）。
-        # 如果你的机器上是别的模型，用 `--model` 或 `ollama pull` 对齐。
-        "model": "qwen2.5:14b",
+        # ⚠️ 这个预设应当指「本机自己那份 ollama」。核实过的本机事实：
+        #   - 本机 `%LOCALAPPDATA%\Programs\Ollama` 里**只有 CPU 后端**
+        #     （一堆 ggml-cpu-*.dll，没有 ggml-cuda.dll / ggml-vulkan.dll），
+        #     所以本机推理必然是 CPU，并且以前撞过提交内存上限（HTTP 500）
+        #   - 本机 `E:\ollama\models` 里**只装了 qwen2.5:7b**（4.4 GB），没有 14b
+        #   - 本机 ollama 服务**平时根本没在跑**（无 ollama.exe 进程，
+        #     server.log 停在 2026-09-16）
+        # 那为什么曾经「感觉能用」？因为 **Cursor / VS Code 的 Remote-SSH
+        # 会把 localhost:11434 转发到 gpu41** —— 于是 `ollama list` 返回的是
+        # gpu41 上的 qwen2.5:14b，`ollama ps` 还显示 `100% GPU`，看起来
+        # 就像本机真的跑起来了。**这是转发造成的假象，不是本机能力。**
+        # 判据：本机只有 7b，看到 14b 就说明走的是转发。
+        # 所以默认模型按「本机实际安装的」写 7b；真要在服务器上跑请用
+        # `--backend gpu41`（那才是显式、不含糊的写法）。
+        # 诊断入口：`python -m agent.cli doctor --backend ollama`
+        # 会打印端口占用者，直接告诉你连的是本机还是被转发了。
+        "model": "qwen2.5:7b",
         "api_key": "ollama",
         "label": "本地 Ollama（免费、无需联网）",
     },

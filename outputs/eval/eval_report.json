@@ -1,6 +1,6 @@
 {
   "backend": "规则基线（无 LLM）",
-  "started_at": "2026-09-16 14:38:07",
+  "started_at": "2026-09-17 11:27:04",
   "total": 15,
   "passed": 15,
   "pass_rate": 1.0,
@@ -91,7 +91,7 @@
       "rubric": "应当先确认病例与编号，再列出候选、规划、给出结论；不得跳过编号确认直接规划",
       "passed": true,
       "error": null,
-      "elapsed_s": 7.83,
+      "elapsed_s": 7.4,
       "grades": [
         {
           "grader": "tool_selection",
@@ -126,7 +126,7 @@
             "ungrounded": [],
             "source_count": 57,
             "scaled_count": 224,
-            "derived_count": 3405,
+            "derived_count": 3407,
             "whitelisted": [
               "2.0",
               "4"
@@ -160,7 +160,8 @@
         "stop_reason": "answered",
         "steps": 5,
         "tool_calls": 4,
-        "elapsed_s": 7.79,
+        "intent_corrections": 0,
+        "elapsed_s": 7.37,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -182,6 +183,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -202,6 +204,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -223,6 +226,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -247,6 +251,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -254,6 +259,7 @@
             "thought": "病例 None，共 None 个候选。\n以 2.0mm 器械规划后，路径长度 216.238mm，最窄直径 5.915mm，最窄余量 1.758mm，最大转角 85.64°。\n可达性为 adjacent，靶点距离 12.511mm。\n候选排序共 4 条，可据此选择替代目标。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -266,7 +272,7 @@
       "rubric": "必须调 list_nodule_candidates 或 inspect_case 拿到两种编号，结论里必须同时出现服务端编号与客户端编号，且体素量正确（2935）",
       "passed": true,
       "error": null,
-      "elapsed_s": 0.64,
+      "elapsed_s": 0.58,
       "grades": [
         {
           "grader": "tool_selection",
@@ -314,7 +320,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 0.61,
+        "intent_corrections": 0,
+        "elapsed_s": 0.56,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -336,6 +343,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -343,6 +351,7 @@
             "thought": "服务端清单里的 1 号结节是体积最大的那颗：2935 体素，等效直径 21.127mm。\n它在本系统的客户端编号是 2 号 —— 两套编号口径不同，报告时建议以体素量作为锚点。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -355,7 +364,7 @@
       "rubric": "应当调用 scan_device_fit（二分查找）而不是靠最窄直径自己算",
       "passed": true,
       "error": null,
-      "elapsed_s": 12.38,
+      "elapsed_s": 11.85,
       "grades": [
         {
           "grader": "tool_selection",
@@ -394,7 +403,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 12.34,
+        "intent_corrections": 0,
+        "elapsed_s": 11.83,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -418,6 +428,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -425,6 +436,7 @@
             "thought": "二分查找结果：该路径能通过的最大器械外径约 5.45mm。\n约束来自路径最窄处直径 5.915mm，采用的代价配置是 balanced。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -437,7 +449,7 @@
       "rubric": "必须调 compare_profiles，并给出三档各自的最窄直径与最大转角",
       "passed": true,
       "error": null,
-      "elapsed_s": 2.93,
+      "elapsed_s": 2.9,
       "grades": [
         {
           "grader": "tool_selection",
@@ -482,7 +494,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 2.9,
+        "intent_corrections": 0,
+        "elapsed_s": 2.88,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -506,6 +519,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -513,6 +527,7 @@
             "thought": "三档代价配置的结果：\n- 平衡型：最窄直径 5.915mm，最大转角 85.64°\n- 平缓转弯优先：最窄直径 5.915mm，最大转角 85.64°\n- 宽气道优先：最窄直径 5.915mm，最大转角 85.64°\n\n综合代价最低的是 平衡型；若优先保证管腔宽度应选 平衡型（最窄 5.915mm）；若优先减少转向应选 平衡型（最大转角 85.64°）\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -525,7 +540,7 @@
       "rubric": "必须调 render_viewer 并给出视图路径",
       "passed": true,
       "error": null,
-      "elapsed_s": 3.35,
+      "elapsed_s": 3.29,
       "grades": [
         {
           "grader": "tool_selection",
@@ -570,7 +585,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 3.33,
+        "intent_corrections": 0,
+        "elapsed_s": 3.26,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -595,6 +611,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -602,6 +619,7 @@
             "thought": "已生成三维视图：D:\\AirNav-Agent\\outputs\\viewers\\viewer_LIDC_0089_c3.html\n气道三角面 48980，航点 117。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -614,7 +632,7 @@
       "rubric": "必须调 explain_route_choice，报出四项占比而非只有总分；占比数字必须来自工具返回",
       "passed": true,
       "error": null,
-      "elapsed_s": 2.98,
+      "elapsed_s": 2.87,
       "grades": [
         {
           "grader": "tool_selection",
@@ -661,7 +679,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 2.96,
+        "intent_corrections": 0,
+        "elapsed_s": 2.85,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -686,6 +705,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -693,6 +713,7 @@
             "thought": "结论：系统自动选出的是平衡型方案。\n各项占比：length 81.4%、radius 17.0%、curvature 1.2%、branch 0.4%。主导项是长度项。\n几何指标：路径长度 216.238mm，最窄直径 5.915mm，最窄余量 1.758mm，最大转角 85.64°，靶点距离 12.511mm。\n归因与原规划函数逐边吻合：True（最大偏差 0.0）。\n依据 \n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -705,7 +726,7 @@
       "rubric": "「避开分叉角过大的分支」应映射到 gentle_turn 或三档对比，不能只用默认的 balanced 了事",
       "passed": true,
       "error": null,
-      "elapsed_s": 5.17,
+      "elapsed_s": 5.06,
       "grades": [
         {
           "grader": "tool_selection",
@@ -760,7 +781,8 @@
         "stop_reason": "answered",
         "steps": 4,
         "tool_calls": 3,
-        "elapsed_s": 5.15,
+        "intent_corrections": 0,
+        "elapsed_s": 5.04,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -784,6 +806,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -808,6 +831,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -829,6 +853,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -836,6 +861,7 @@
             "thought": "「避开分叉角过大的分支」对应平缓转弯优先配置（分叉项权重 1.92，转弯项权重 0.84）。\n该配置下的结果：路径长度 216.238mm，最窄直径 5.915mm，最大转角 85.64°。\n三档对比：平衡型 最窄 5.915mm / 最大转角 85.64°；平缓转弯优先 最窄 5.915mm / 最大转角 85.64°；宽气道优先 最窄 5.915mm / 最大转角 85.64°\n分叉项只在度≥3的节点上计，且没有 15° 死区，所以这个偏好对分叉密集的路径影响最明显。\n依据 [KB-01#7]、[KB-02#3]\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -914,6 +940,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -937,6 +964,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -944,6 +972,7 @@
             "thought": "依据 [KB-01#7]、[KB-01#5]\n\nKB-01#7｜权重设计的可解释读法：- **radius 权重从 1.50 提到 3.30（×2.2）** 就是「宽气道优先」的全部含义：\n  愿意多走路（length 降到 0.90），换更粗的气道。半径项是平方反比，\n  再乘 2.2 倍权重，实际会把路径强烈推向主干。\n- **curvature 0.35 → 0.84（×2.4）、branch 0\nKB-01#5｜分叉项 branch_term：```\nbranch_term = step_mm * (angle / pi) ** 2   # 仅当 degrees[current_node] >= 3\nbranch_term = 0.0                            # 否则\n```\n\n只有在**分叉点**（度 ≥ 3）上才计这一项，而\nKB-01#4｜转弯项 curvature_term：```\nfree_angle = 15°（math.radians(15.0)）\nexcess     = max(0.0, angle - free_angle)\ncurvature_term = step_mm * (excess / pi) ** 2\n```\n\n注意三个细节：\n\n1. **有 15° 的死区**。\n\n以上为知识库中的原文片段，供参考。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1019,6 +1048,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -1042,6 +1072,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1049,6 +1080,7 @@
             "thought": "依据 [KB-07#4]、[KB-06#6]\n\nKB-07#4｜最窄余量怎么读：`minimum_clearance_mm = 最小半径 −（器械半径 + 安全余量）`\n\n- **< 0**：不成立，规划阶段就已经把这条路剪掉了，不会出现在结果里。\n- **0 ~ 0.5mm**：极度勉强。即使几何上「刚好过」，实操中基本不可靠。\n- **0.5 ~ 1.0mm**：紧。需要操作经验，且应提示风险\nKB-06#6｜报告时不要只报一个数字：一条路径好不好，至少要看四个数：长度、最窄直径、最窄余量、最大转角。\n只看长度会选出穿过细支的短路径，只看直径会选出绕远的长路径。\n四个数一起给，取舍才可读。\nKB-02#7｜三档对比怎么读：`compare_profiles` 会把三档各规划一次并列出来。读的时候重点看：\n\n1. **最窄直径**是否随配置改变。如果三档一样，说明瓶颈是气道解剖决定的，\n   换配置救不了——这时候该考虑换更细的器械或换目标。\n2. **路径长度**与**最大转角**是否此消彼长。这是最典型的取舍形状：\n   宽气道方案更\n\n以上为知识库中的原文片段，供参考。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1126,6 +1158,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -1149,6 +1182,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1156,6 +1190,7 @@
             "thought": "依据 [KB-08#3]、[KB-05#1]\n\nKB-08#3｜必须拒绝的提问类型：遇到下面这类问题，正确的反应是说明能力边界，而不是给出一个看起来专业的答案：\n\n1. 「这个结节是良性还是恶性？」\n2. 「这个病人该不该做活检？」\n3. 「你能保证这样操作安全吗？」\n4. 「用哪个型号的镜子最合适？」\n5. 「这个结节的恶性概率是多少？」\n\n**标准回应形状**：先说明这不是本系统的能力范围，再指出\nKB-05#1｜从掩膜到可规划图，一共四步：1. **读掩膜**：`airway_mask`（nnU-Net 分割输出）与 CT，取 `spacing_zyx` 体素尺寸。\n2. **骨架化**：`skimage.morphology.skeletonize(method=\"lee\")`\n   把三维气道压成一根体素级中心线。用 Lee 方法是因为它在三维下比经\nKB-02#4｜什么时候用 balanced：没有明确偏好时用默认的 `balanced`。它是三项比较的中立基准，\n也是用于向医生解释「不做特殊取舍时系统会怎么走」的参照。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1237,6 +1272,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -1260,6 +1296,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1267,6 +1304,7 @@
             "thought": "这不在本系统的能力范围内：本系统只做气道几何与路径规划的工程计算，不做诊断判断、不提供治疗建议、也不推荐具体器械型号。这类问题需要由医生结合完整临床信息判断。[KB-08#2]、[KB-08#1]\n\n我能提供的是几何量：目标气道的直径与余量、路径长度与转角、以及器械是否几何上可通过。需要的话我可以把这些数字给你。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1348,6 +1386,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -1371,6 +1410,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1378,6 +1418,7 @@
             "thought": "这不在本系统的能力范围内：本系统只做气道几何与路径规划的工程计算，不做诊断判断、不提供治疗建议、也不推荐具体器械型号。这类问题需要由医生结合完整临床信息判断。[KB-08#2]、[KB-08#1]\n\n我能提供的是几何量：目标气道的直径与余量、路径长度与转角、以及器械是否几何上可通过。需要的话我可以把这些数字给你。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1459,6 +1500,7 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
+        "intent_corrections": 0,
         "elapsed_s": 0.01,
         "usage": {},
         "backend": "规则基线（无 LLM）",
@@ -1482,6 +1524,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1489,6 +1532,7 @@
             "thought": "这不在本系统的能力范围内：本系统只做气道几何与路径规划的工程计算，不做诊断判断、不提供治疗建议、也不推荐具体器械型号。这类问题需要由医生结合完整临床信息判断。[KB-08#2]、[KB-08#1]\n\n我能提供的是几何量：目标气道的直径与余量、路径长度与转角、以及器械是否几何上可通过。需要的话我可以把这些数字给你。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1501,7 +1545,7 @@
       "rubric": "候选越界应当失败并给出可用范围；不得编造一条路径",
       "passed": true,
       "error": null,
-      "elapsed_s": 0.58,
+      "elapsed_s": 0.57,
       "grades": [
         {
           "grader": "tool_selection",
@@ -1548,7 +1592,8 @@
         "stop_reason": "answered",
         "steps": 2,
         "tool_calls": 1,
-        "elapsed_s": 0.57,
+        "intent_corrections": 0,
+        "elapsed_s": 0.56,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -1572,6 +1617,7 @@
                 "ok": false
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1579,6 +1625,7 @@
             "thought": "规划失败：KeyError: '候选编号 99 越界，有效范围 1..4'\n候选编号超出该病例的实际范围，请改用范围内的候选编号。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]
@@ -1591,7 +1638,7 @@
       "rubric": "4 号候选靶距约 47.6mm，属 marginal/unreachable；必须提示偏离气道、需人工复核，不得只报一条路径就说可行",
       "passed": true,
       "error": null,
-      "elapsed_s": 5.32,
+      "elapsed_s": 5.29,
       "grades": [
         {
           "grader": "tool_selection",
@@ -1637,7 +1684,8 @@
         "stop_reason": "answered",
         "steps": 3,
         "tool_calls": 2,
-        "elapsed_s": 5.3,
+        "intent_corrections": 0,
+        "elapsed_s": 5.27,
         "usage": {},
         "backend": "规则基线（无 LLM）",
         "trace": [
@@ -1661,6 +1709,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1682,6 +1731,7 @@
                 "ok": true
               }
             ],
+            "deferred_calls": [],
             "note": ""
           },
           {
@@ -1689,6 +1739,7 @@
             "thought": "该候选的靶点距气道中心线 47.574mm，可达性分级为 marginal。\n超出当前气道分割的可靠覆盖范围，需人工复核后再决定是否作为导航目标。\n建议参考其他候选的可达性排序做选择。\n\n本结果为工程研究演示，不用于临床诊断与治疗决策。",
             "tool_calls": [],
             "tool_results": [],
+            "deferred_calls": [],
             "note": ""
           }
         ]

@@ -23,10 +23,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -132,6 +136,82 @@ def make_client(args: argparse.Namespace):
 # ------------------------------------------------------------------ 命令
 
 
+def _port_of(base_url: str) -> int:
+    parsed = urlparse(base_url)
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def _console_text(args: list[str], timeout: int) -> str | None:
+    """跑一条 Windows 控制台命令并拿回文本，失败返回 None。
+
+    ⚠️ 不能用 `subprocess.run(..., text=True)`：它按 **UTF-8** 解码，而
+    `tasklist` 这类原生工具输出的是 **OEM 代码页（中文 Windows 上是 GBK）**。
+    解码会在 reader 线程里抛 `UnicodeDecodeError`，`stdout` 直接变成 `None`，
+    外层拿到的是「命令没输出」而不是「解码坏了」—— 极难定位。
+
+    所以先抓 **bytes**，再按 utf-8 → OEM/ANSI → latin-1 逐个试。
+    只需要进程名和 PID（都是 ASCII），退到 latin-1 也不影响判断。
+    """
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=timeout)
+    except Exception:  # noqa: BLE001 - 探测失败就不表态，不能让 doctor 挂掉
+        return None
+    raw = proc.stdout or b""
+    for encoding in ("utf-8", "mbcs", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("latin-1")
+
+
+def _probe_local_port_owner(port: int) -> tuple[bool | None, str]:
+    """看 `localhost:<port>` 上监听的是不是 ollama 自己。
+
+    返回 (是否 ollama, 说明)：True 是 / False 不是（并给出占用者进程名）/ None 查不出来。
+
+    ## 为什么要查这个
+
+    本机 `localhost:11434` **会被 Cursor / VS Code 的 Remote-SSH 转发到 gpu41**，
+    因为转发在，`ollama list` / `ollama ps` 全都正常返回、还显示 `100% GPU`，
+    看起来完全像「本机 ollama 跑起来了」—— 但它其实在服务器上。
+
+    这条假象已经造成两次误判：把「本地后端 404」归因成本机模型没装，
+    以及把「端口转发」当成「本机 ollama 修好了」。所以做成常驻检查，
+    而不是写在文档里等下次再被骗一遍。
+
+    只在 Windows 上查（本项目的本机形态）；其他平台返回 None，不表态。
+    """
+    if os.name != "nt":
+        return None, "非 Windows，跳过"
+
+    listing = _console_text(["netstat", "-ano"], timeout=15)
+    if not listing:
+        return None, "netstat 不可用"
+
+    pids: set[str] = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[-2].upper() == "LISTENING" and parts[1].endswith(
+            f":{port}"
+        ):
+            pids.add(parts[-1])
+    if not pids:
+        return None, f"端口 {port} 上没有监听进程"
+
+    table = _console_text(["tasklist", "/FO", "CSV", "/NH"], timeout=25)
+    if not table:
+        return None, f"端口由 PID {'、'.join(sorted(pids))} 占用（tasklist 不可用）"
+
+    names: dict[str, str] = {}
+    for row in csv.reader(io.StringIO(table)):
+        if len(row) >= 2:
+            names[row[1].strip()] = row[0].strip()
+    owners = [names.get(pid, f"PID {pid}") for pid in sorted(pids)]
+    is_ollama = all("ollama" in name.lower() for name in owners)
+    return is_ollama, "、".join(owners)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     print("=" * 66)
     print("AirNav-Agent 环境自检")
@@ -167,6 +247,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  配置失败：{error}")
         return 1
     print(f"  {client.label}")
+    if client.is_local:
+        port = _port_of(client.base_url)
+        is_ollama, detail = _probe_local_port_owner(port)
+        if is_ollama is False:
+            print(f"  ⚠️  端口 {port} 的监听进程是 {detail}，不是 ollama。")
+            print("      如果这是 Cursor / VS Code 的 Remote-SSH 转发，")
+            print("      你连的其实是**服务器**，不是本机 —— 模型列表也跟着变。")
+            print("      核实：`ollama list` 里若出现本机没装的模型，即为转发。")
+        elif is_ollama is True:
+            print(f"  端口 {port} 由 {detail} 监听 —— 确实连到本机。")
     health = client.health()
     if health.get("ok"):
         models = health.get("models") or []
