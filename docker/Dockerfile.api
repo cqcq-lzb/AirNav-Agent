@@ -1,0 +1,12 @@
+FROM python:3.10-slim-bookworm
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 API_DATA_DIR=/data
+WORKDIR /app
+COPY airway_navigation_system_v3_2_complete/backend/requirements_api.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/requirements.txt
+COPY airway_navigation_system_v3_2_complete/backend/ /app/backend/
+COPY airway_navigation_system_v3_2_complete/run_stage4_server_pipeline.py /app/run_stage4_server_pipeline.py
+COPY airway_navigation_system_v3_2_complete/server_config.json /app/server_config.json
+COPY segmentation_optimization/run_optimized_nnunet.py segmentation_optimization/optimize_segmentations.py segmentation_optimization/optimizer_config.json /opt/airway_navigation_v1/segmentation_optimization/
+RUN mkdir -p /data/jobs /root/.ssh
+EXPOSE 8000
+CMD ["uvicorn","backend.api_server:app","--host","0.0.0.0","--port","8000"]

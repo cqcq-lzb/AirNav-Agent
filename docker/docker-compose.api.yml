@@ -1,0 +1,21 @@
+services:
+  airway-navigation-api:
+    build:
+      context: ../..
+      dockerfile: airway_navigation_system_v3_2_complete/docker/Dockerfile.api
+    image: airway-navigation-api:1.0
+    container_name: airway-navigation-api
+    restart: unless-stopped
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    environment:
+      API_DATA_DIR: /data
+      SERVER_CONFIG_PATH: /app/server_config.json
+      SSH_KEY_PATH: /root/.ssh/id_ed25519
+      SSH_KNOWN_HOSTS: /root/.ssh/known_hosts
+      API_TOKEN: "${API_TOKEN:-}"
+      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-4294967296}"
+    volumes:
+      - "${API_DATA_DIR_HOST:-../../api_data}:/data"
+      - "${SSH_DIR:?Set SSH_DIR to a directory containing id_ed25519 and known_hosts}:/root/.ssh:ro"
+      - "${SERVER_CONFIG_HOST:-../server_config.json}:/app/server_config.json:ro"

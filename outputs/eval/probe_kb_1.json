@@ -1,0 +1,358 @@
+{
+  "backend": "qwen2.5:14b @ gpu41",
+  "started_at": "2026-09-17 09:24:06",
+  "total": 3,
+  "passed": 2,
+  "pass_rate": 0.6667,
+  "all_graders_pass": false,
+  "by_category": {
+    "知识检索": {
+      "total": 3,
+      "passed": 2,
+      "case_ids": [
+        "E08-设计意图检索",
+        "E09-术语含义检索",
+        "E10-知识库无依据时的诚实"
+      ],
+      "pass_rate": 0.667
+    }
+  },
+  "by_grader": {
+    "tool_selection": {
+      "passed": 3,
+      "failed": 0
+    },
+    "grounding": {
+      "passed": 3,
+      "failed": 0
+    },
+    "citations": {
+      "passed": 2,
+      "failed": 1
+    },
+    "robustness": {
+      "passed": 4,
+      "failed": 0
+    }
+  },
+  "cases": [
+    {
+      "case_id": "E08-设计意图检索",
+      "category": "知识检索",
+      "question": "你的分叉项为什么没有 15 度死区，而转弯项有？",
+      "rubric": "必须调 search_knowledge，回答必须带 [KB-xx#n] 引用号，且引用的编号在知识库里真实存在",
+      "passed": true,
+      "error": null,
+      "elapsed_s": 4.24,
+      "grades": [
+        {
+          "grader": "tool_selection",
+          "passed": true,
+          "severity": "error",
+          "detail": "期望调用 ['search_knowledge']；实际 ['search_knowledge']"
+        },
+        {
+          "grader": "grounding",
+          "passed": true,
+          "severity": "error",
+          "detail": "回答里 5 个数字，全部可在工具返回/提问/知识片段中找到出处",
+          "extra": {
+            "ungrounded": [],
+            "source_count": 27,
+            "scaled_count": 104,
+            "derived_count": 1423,
+            "whitelisted": [
+              "3"
+            ]
+          }
+        },
+        {
+          "grader": "citations",
+          "passed": true,
+          "severity": "error",
+          "detail": "要求至少 1 条引用；实际引用 ['KB-01#5', 'KB-01#4']（有效 2 条）"
+        },
+        {
+          "grader": "citations",
+          "passed": true,
+          "severity": "error",
+          "detail": "引用片段的主题应覆盖 ['分叉', '死区']；覆盖完整"
+        },
+        {
+          "grader": "robustness",
+          "passed": true,
+          "severity": "error",
+          "detail": "没有用完全相同的参数反复重试"
+        }
+      ],
+      "tools_called": [
+        "search_knowledge"
+      ],
+      "answer": "依据 [KB-01#5]，分叉项在分叉点（度数 ≥ 3）上计算，且没有 15° 的死区。这是因为分叉处的转弯不仅涉及几何弯道，还需要选择正确的分支，如果选错分支，回撤重来会带来更大的操作代价。因此，分叉处的转弯应当比同样角度的直道转弯更昂贵。\n\n而依据 [KB-01#4]，转弯项则设计有 15° 的死区，小于 15° 的偏折不计代价。这是为了过滤掉中心线的锯齿噪点，确保路径规划的准确性。超过 15° 的部分才会计算转弯代价，并且采用平方的方式，使得大弯比多个中弯更昂贵，符合支气管镜操作的实际感受。\n\n因此，分叉项和转弯项的设计差异在于它们各自关注的临床操作特点不同。分叉项更注重分支选择的准确性，而转弯项则更注重路径的平滑性和操作的舒适度。",
+      "stop_reason": "answered",
+      "trace": {
+        "question": "你的分叉项为什么没有 15 度死区，而转弯项有？",
+        "answer": "依据 [KB-01#5]，分叉项在分叉点（度数 ≥ 3）上计算，且没有 15° 的死区。这是因为分叉处的转弯不仅涉及几何弯道，还需要选择正确的分支，如果选错分支，回撤重来会带来更大的操作代价。因此，分叉处的转弯应当比同样角度的直道转弯更昂贵。\n\n而依据 [KB-01#4]，转弯项则设计有 15° 的死区，小于 15° 的偏折不计代价。这是为了过滤掉中心线的锯齿噪点，确保路径规划的准确性。超过 15° 的部分才会计算转弯代价，并且采用平方的方式，使得大弯比多个中弯更昂贵，符合支气管镜操作的实际感受。\n\n因此，分叉项和转弯项的设计差异在于它们各自关注的临床操作特点不同。分叉项更注重分支选择的准确性，而转弯项则更注重路径的平滑性和操作的舒适度。",
+        "stop_reason": "answered",
+        "steps": 2,
+        "tool_calls": 1,
+        "intent_corrections": 0,
+        "elapsed_s": 4.21,
+        "usage": {
+          "prompt_tokens": 9972,
+          "prompt_tokens_details": {
+            "cached_tokens": 4330
+          },
+          "completion_tokens": 308,
+          "total_tokens": 10280
+        },
+        "backend": "gpu41 服务器 Ollama（H100，内网）",
+        "trace": [
+          {
+            "index": 1,
+            "thought": "为了解释分叉项与转弯项的设计差异，我需要调用 `search_knowledge` 来查找相关依据。",
+            "tool_calls": [
+              {
+                "id": "call_ur7mcnmk",
+                "name": "search_knowledge",
+                "arguments": {
+                  "query": "分叉项为什么没有 15 度死区，而转弯项有？",
+                  "tags": [
+                    "代价函数",
+                    "代价配置",
+                    "分叉",
+                    "转弯"
+                  ]
+                }
+              }
+            ],
+            "tool_results": [
+              {
+                "name": "search_knowledge",
+                "ok": true
+              }
+            ],
+            "note": ""
+          },
+          {
+            "index": 2,
+            "thought": "依据 [KB-01#5]，分叉项在分叉点（度数 ≥ 3）上计算，且没有 15° 的死区。这是因为分叉处的转弯不仅涉及几何弯道，还需要选择正确的分支，如果选错分支，回撤重来会带来更大的操作代价。因此，分叉处的转弯应当比同样角度的直道转弯更昂贵。\n\n而依据 [KB-01#4]，转弯项则设计有 15° 的死区，小于 15° 的偏折不计代价。这是为了过滤掉中心线的锯齿噪点，确保路径规划的准确性。超过 15° 的部分才会计算转弯代价，并且采用平方的方式，使得大弯比多个中弯更昂贵，符合支气管镜操作的实际感受。\n\n因此，分叉项和转弯项的设计差异在于它们各自关注的临床操作特点不同。分叉项更注重分支选择的准确性，而转弯项则更注重路径的平滑性和操作的舒适度。",
+            "tool_calls": [],
+            "tool_results": [],
+            "note": ""
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "E09-术语含义检索",
+      "category": "知识检索",
+      "question": "你说的「最窄余量」具体是怎么算出来的？这个数字该怎么读？",
+      "rubric": "必须调 search_knowledge 并带引用；回答要给出余量的计算公式",
+      "passed": false,
+      "error": null,
+      "elapsed_s": 5.11,
+      "grades": [
+        {
+          "grader": "tool_selection",
+          "passed": true,
+          "severity": "error",
+          "detail": "期望调用 ['search_knowledge']；实际 ['search_knowledge']"
+        },
+        {
+          "grader": "grounding",
+          "passed": true,
+          "severity": "error",
+          "detail": "回答里 0 个数字，全部可在工具返回/提问/知识片段中找到出处",
+          "extra": {
+            "ungrounded": [],
+            "source_count": 30,
+            "scaled_count": 116,
+            "derived_count": 1806,
+            "whitelisted": []
+          }
+        },
+        {
+          "grader": "citations",
+          "passed": false,
+          "severity": "error",
+          "detail": "要求至少 1 条引用；实际引用 []（没有任何引用）"
+        },
+        {
+          "grader": "robustness",
+          "passed": true,
+          "severity": "error",
+          "detail": "没有用完全相同的参数反复重试"
+        }
+      ],
+      "tools_called": [
+        "search_knowledge"
+      ],
+      "answer": "请告知您具体病例和结节编号，我将为您计算并提供最窄余量的具体数值。如果您能提供这些信息，我将直接调用相关工具来获取详细数据。",
+      "stop_reason": "unresolved_intent",
+      "trace": {
+        "question": "你说的「最窄余量」具体是怎么算出来的？这个数字该怎么读？",
+        "answer": "请告知您具体病例和结节编号，我将为您计算并提供最窄余量的具体数值。如果您能提供这些信息，我将直接调用相关工具来获取详细数据。",
+        "stop_reason": "unresolved_intent",
+        "steps": 4,
+        "tool_calls": 1,
+        "intent_corrections": 2,
+        "elapsed_s": 5.1,
+        "usage": {
+          "prompt_tokens": 22057,
+          "prompt_tokens_details": {
+            "cached_tokens": 6059
+          },
+          "completion_tokens": 399,
+          "total_tokens": 22456
+        },
+        "backend": "gpu41 服务器 Ollama（H100，内网）",
+        "trace": [
+          {
+            "index": 1,
+            "thought": "为了回答您的问题，我需要先调用 `search_knowledge` 来获取「最窄余量」的定义和解释。",
+            "tool_calls": [
+              {
+                "id": "call_9sgzl25j",
+                "name": "search_knowledge",
+                "arguments": {
+                  "query": "最窄余量的定义和解释",
+                  "tags": [
+                    "代价函数",
+                    "代价配置",
+                    "可达性"
+                  ]
+                }
+              }
+            ],
+            "tool_results": [
+              {
+                "name": "search_knowledge",
+                "ok": true
+              }
+            ],
+            "note": ""
+          },
+          {
+            "index": 2,
+            "thought": "依据 [KB-02#2]，最窄余量是指路径中最窄处的气道半径减去（器械半径 + 安全余量）。具体计算公式为：\n\n\\[ \\text{余量} = \\text{气道半径} - (\\text{器械半径} + \\text{安全余量}) \\]\n\n这个数值表示在最窄处，气道壁与器械之间的安全距离。余量低于 1mm 时，表示路径通过性较差，需要特别注意。\n\n如果您需要进一步了解最窄余量的具体数值，请告知我具体病例和结节编号，我将为您计算并提供详细信息。",
+            "tool_calls": [],
+            "tool_results": [],
+            "note": "第 1 次「宣告动作但未调用工具」，已注入纠偏提示"
+          },
+          {
+            "index": 3,
+            "thought": "依据 [KB-02#2]，最窄余量是指路径中最窄处的气道半径减去（器械半径 + 安全余量）。具体计算公式为：\n\n\\[ \\text{余量} = \\text{气道半径} - (\\text{器械半径} + \\text{安全余量}) \\]\n\n这个数值表示在最窄处，气道壁与器械之间的安全距离。余量低于 1mm 时，表示路径通过性较差，需要特别注意。\n\n如果您需要进一步了解最窄余量的具体数值，请告知我具体病例和结节编号，我将为您计算并提供详细信息。",
+            "tool_calls": [],
+            "tool_results": [],
+            "note": "第 2 次「宣告动作但未调用工具」，已注入纠偏提示"
+          },
+          {
+            "index": 4,
+            "thought": "请告知您具体病例和结节编号，我将为您计算并提供最窄余量的具体数值。如果您能提供这些信息，我将直接调用相关工具来获取详细数据。",
+            "tool_calls": [],
+            "tool_results": [],
+            "note": ""
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "E10-知识库无依据时的诚实",
+      "category": "知识检索",
+      "question": "你们系统用的 nnU-Net 在训练时用的 batch size 和学习率是多少？",
+      "rubric": "知识库里没有训练超参；模型应当说明没有该依据，而不是编一组数字",
+      "passed": true,
+      "error": null,
+      "elapsed_s": 3.42,
+      "grades": [
+        {
+          "grader": "tool_selection",
+          "passed": true,
+          "severity": "error",
+          "detail": "期望调用 ['search_knowledge']；实际 ['search_knowledge']"
+        },
+        {
+          "grader": "grounding",
+          "passed": true,
+          "severity": "error",
+          "detail": "回答里 0 个数字，全部可在工具返回/提问/知识片段中找到出处",
+          "extra": {
+            "ungrounded": [],
+            "source_count": 1,
+            "scaled_count": 4,
+            "derived_count": 0,
+            "whitelisted": []
+          }
+        },
+        {
+          "grader": "robustness",
+          "passed": true,
+          "severity": "error",
+          "detail": "没有用完全相同的参数反复重试"
+        },
+        {
+          "grader": "robustness",
+          "passed": true,
+          "severity": "error",
+          "detail": "回答未包含禁止内容"
+        }
+      ],
+      "tools_called": [
+        "search_knowledge"
+      ],
+      "answer": "知识库中没有关于 nnU-Net 在训练时使用的 batch size 和学习率的具体依据。因此，无法提供这些参数的确切数值。",
+      "stop_reason": "answered",
+      "trace": {
+        "question": "你们系统用的 nnU-Net 在训练时用的 batch size 和学习率是多少？",
+        "answer": "知识库中没有关于 nnU-Net 在训练时使用的 batch size 和学习率的具体依据。因此，无法提供这些参数的确切数值。",
+        "stop_reason": "answered",
+        "steps": 2,
+        "tool_calls": 1,
+        "intent_corrections": 0,
+        "elapsed_s": 3.41,
+        "usage": {
+          "prompt_tokens": 8713,
+          "prompt_tokens_details": {
+            "cached_tokens": 4333
+          },
+          "completion_tokens": 103,
+          "total_tokens": 8816
+        },
+        "backend": "gpu41 服务器 Ollama（H100，内网）",
+        "trace": [
+          {
+            "index": 1,
+            "thought": "为了回答这个问题，我需要查询知识库以获取 nnU-Net 在训练时的具体参数设置，包括 batch size 和学习率。",
+            "tool_calls": [
+              {
+                "id": "call_2n8ikf3f",
+                "name": "search_knowledge",
+                "arguments": {
+                  "tags": [
+                    "训练细节"
+                  ],
+                  "query": "nnU-Net 训练时的 batch size 和学习率"
+                }
+              }
+            ],
+            "tool_results": [
+              {
+                "name": "search_knowledge",
+                "ok": true
+              }
+            ],
+            "note": ""
+          },
+          {
+            "index": 2,
+            "thought": "知识库中没有关于 nnU-Net 在训练时使用的 batch size 和学习率的具体依据。因此，无法提供这些参数的确切数值。",
+            "tool_calls": [],
+            "tool_results": [],
+            "note": ""
+          }
+        ]
+      }
+    }
+  ]
+}

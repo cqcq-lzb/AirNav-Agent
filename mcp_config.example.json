@@ -1,0 +1,42 @@
+{
+  "_comment": "AirNav MCP server 客户端配置示例。把 mcpServers 下的条目合并进你自己的配置即可。路径请按本机实际情况替换。",
+  "_targets": {
+    "Claude Desktop (Windows)": "%APPDATA%\\Claude\\claude_desktop_config.json",
+    "Cursor": "项目根目录 .cursor/mcp.json，或 Cursor Settings → MCP"
+  },
+  "mcpServers": {
+    "airnav-agent": {
+      "command": "D:\\AirNav-Agent\\.venv-mcp\\Scripts\\python.exe",
+      "args": ["-m", "agent.mcp_server"],
+      "cwd": "D:\\AirNav-Agent",
+      "env": {
+        "PYTHONPATH": "D:\\AirNav-Agent",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONNOUSERSITE": "1"
+      }
+    }
+  },
+  "_why_venv": [
+    "为什么解释器指向项目内的 .venv-mcp 而不是 D:\\miniforge\\envs\\dicom\\python.exe：",
+    "miniforge 是管理员安装的，其 ACL 对普通用户只给 (RX)，D:\\miniforge\\envs\\dicom\\Lib\\site-packages 无法写入，",
+    "所以没法把依赖正式装进 conda 环境。而 conda 环境里 mcp 及其全部依赖（26 个包）实际上只存在于",
+    "Python 3.10 的 user-site（%APPDATA%\\Python\\Python310\\site-packages），pip list 会显示「已安装」，",
+    "但一旦 PYTHONNOUSERSITE=1 或换解释器就 ModuleNotFoundError。",
+    ".venv-mcp 是项目内可写位置，用 --system-site-packages 创建，",
+    "既能看到 conda 环境里的 numpy / scipy / SimpleITK / vtk，又把自己缺的 25 个 MCP 依赖装在本地。",
+    "依赖版本锁定在 requirements_mcp.txt（完整闭包）与 requirements_mcp_env.txt（补装部分）。"
+  ],
+  "_notes": [
+    "用 python -m agent.mcp_server 启动，不是直接跑脚本文件 —— 这样 agent 包内的相对导入才成立。",
+    "cwd 必须是项目根目录 D:\\AirNav-Agent，病例目录 cases/ 与知识库 agent/rag/knowledge/ 都是相对它解析的。",
+    "PYTHONIOENCODING=utf-8 是必需的：工具返回大量中文，Windows 默认 GBK 会导致协议报文里的中文损坏。",
+    "PYTHONNOUSERSITE=1 是刻意加的：venv 里 ENABLE_USER_SITE 仍为 True，user-site 还在 sys.path 上，",
+    "  只是被 venv 站点遮住。显式屏蔽后启动结果不再受全局用户目录的偶然内容影响。",
+    "  已实测：屏蔽后完整闭包与 server 导入均正常（见 check_mcp 第 0 层）。",
+    "服务以 stdio 传输，日志会写到 stderr，不要往 stdout 打印任何调试信息，否则会污染协议帧。",
+    "首次连接后建议先调 list_cases 确认病例可见，再调 inspect_case 看候选编号对照。",
+    "排查启动失败的第一步：用配置里的同一个解释器跑",
+    "  .venv-mcp\\Scripts\\python.exe -m agent.scripts.check_mcp",
+    "它会分四层报告问题，第 0 层专门查依赖归属。"
+  ]
+}

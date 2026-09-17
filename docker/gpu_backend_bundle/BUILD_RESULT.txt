@@ -1,0 +1,19 @@
+Airway Navigation Complete GPU Backend
+======================================
+
+Image: airway-navigation-gpu-backend:2.0
+Export: airway-navigation-gpu-backend-2.0.tar
+Bytes: 6951619072
+SHA-256: b533f6d7340cc79885b88614788edc7302f809e347ff2bfaecb7f608a3b591a0
+
+Verified in the image:
+- nnU-Net environment: PyTorch 2.12.1+cu130, CUDA 13.0, SimpleITK 2.5.5
+- MANet environment: PyTorch 2.4.1+cu121, CUDA 12.1, SimpleITK 2.3.1
+- MANet model present
+- MANet native C++ box extension imports successfully
+- Dataset520 airway model present
+- Complete stage-4 pipeline present
+- FastAPI /health returned HTTP 200
+
+GPU inference was not executed on this Windows Docker Desktop host.
+Run the GPU smoke test on a Linux NVIDIA host with NVIDIA Container Toolkit.

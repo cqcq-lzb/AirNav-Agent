@@ -1,0 +1,20 @@
+{
+  "_comment": "AirNav 远程 GPU 服务器配置模板。复制本文件为 server_config.json 并填入你自己的值。server_config.json 已被 .gitignore 排除，不会入库。",
+  "_notes": [
+    "本文件不包含任何密码。SSH 认证走密钥或交互输入，不要把密码写进这里。",
+    "backend_api_url 指向 GPU 后端容器暴露的 HTTP 地址；本地 Docker 场景通常是 http://127.0.0.1:8000。",
+    "remote_* 三项是 nnU-Net 在远程机上的数据目录，需与远程机实际布局一致。"
+  ],
+  "server_host": "192.168.0.1",
+  "server_port": 22,
+  "server_user": "your-user",
+  "default_gpu": 0,
+  "backend_api_url": "http://127.0.0.1:8000",
+  "remote_engineering_dir": "/data/home/your-user/nnUNet/nav_project/engineering_demo",
+  "remote_python_candidates": [
+    "/data/home/your-user/conda/envs/airnav/bin/python"
+  ],
+  "nnunet_raw": "/data/home/your-user/nnUNet/nnUNet_raw",
+  "nnunet_preprocessed": "/data/home/your-user/nnUNet/nnUNet_preprocessed",
+  "nnunet_results": "/data/home/your-user/nnUNet/nnUNet_results"
+}

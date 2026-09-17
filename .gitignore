@@ -1,0 +1,117 @@
+# ============================================================
+# AirNav-Agent .gitignore
+#
+# 设计原则：
+#   1. 凡是「本机实例配置」「大数据」「可再生中间产物」一律不入库
+#   2. 凡是「人写的源码 / 文档 / 评测报告 / viewer 产物」一律入库
+#   3. 凭据类文件用「白名单例外」写法（先全禁 .env，再放行 *.example）
+# ============================================================
+
+# ---------- 虚拟环境 ----------
+# 项目内 venv（--system-site-packages 建，约 75M）
+.venv-mcp/
+venv/
+.venv/
+env/
+
+# ---------- Python 缓存与构建产物 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- 运行期缓存 ----------
+# 病例加载缓存（走 scipy EDT 的代价很大，缓存在本地即可重建）
+.cache/
+
+# ---------- 病例数据（1.9G DICOM）----------
+# 真实病例数据体积大且涉及隐私，绝不入库
+cases/
+api_data/
+
+# ---------- 🔴 本机 DLP 托管文件（git 读不到真实内容）----------
+# requirements_mcp.txt / requirements_mcp_env.txt 在本机被 DLP 改写，
+# 具体表现有三种，且互相之间会来回切换：
+#   形态 A：整体加密，文件头 %TSD-Header-###%，块对齐到 8192 字节
+#   形态 B：正文不动，尾部补 \x00 到块对齐
+#   形态 C：明文，但中文被按系统 ANSI 码页（GBK）重编码
+# 实测：Python 进程能拿到明文（1597B / 1736B），
+#       但 git.exe / MSYS 工具 / 编辑器读到的是 8192B 密文。
+# 因此入库的会是密文，clone 出来完全不可用。
+# 处置：不入库。这两个文件由脚本按需重建，消费端自带清洗：
+#   python -m agent.scripts.lock_mcp_deps --write    # 重新产出
+#   python -m agent.scripts.lock_mcp_deps --install   # 装包（自动清洗 NUL）
+requirements_mcp.txt
+requirements_mcp_env.txt
+
+# 镜像归档的校验和：归档本身（*.tar）已排除，留下校验值是孤儿文件
+*.tar.sha256
+*.tar.sha256.*
+
+# ---------- 输出产物 ----------
+# 截图 25M：由 demo_scripted / render_viewer 随时重建，不入库
+outputs/shots/
+
+# ---------- Docker ----------
+# 镜像归档（313M + 63M）
+docker/*.tar
+docker/*.tar.gz
+docker/*.zip
+# 构建日志（132K + 116K）
+docker/*.log
+# 构建上下文（450M，含 nnUNet 权重与底包）
+docker/*/build_context/
+docker/build_context/
+# 运行期数据（194M + 65M，容器挂载出的病例结果）
+docker/*/runtime_data/
+docker/*/runtime_cases/
+docker/*/runtime_status/
+
+# ---------- 🔴 凭据（关键）----------
+# 策略：全禁 .env 类，再统一放行所有 *.example（示例文件必须入库）
+#   注意：gitignore 中 * 不跨 /，因此放行必须用 **/ 前缀，
+#   否则 docker/.env.api.example 这种「二级后缀」会被漏放行。
+.env
+.env.*
+**/.env
+**/.env.*
+!**/*.example
+# 实测 docker/.env.api 内含真实 API_TOKEN（43 字符），必须排除
+**/.env.server
+
+# 本机服务器配置（含内网地址、用户名、远程路径）
+# 仓库内保留 server_config.example.json 作为模板
+server_config.json
+
+# SSH 私钥 / 证书（双保险，正常情况下不该出现在项目里）
+id_rsa*
+id_ed25519*
+*.pem
+*.ppk
+*.key
+known_hosts
+authorized_keys
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------- 临时目录 ----------
+tmp/
+temp/
+*.tmp

@@ -1,0 +1,7 @@
+numpy
+scipy
+scikit-image
+SimpleITK
+vtk
+PySide6
+paramiko

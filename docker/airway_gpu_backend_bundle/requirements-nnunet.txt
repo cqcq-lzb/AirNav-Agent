@@ -1,0 +1,13 @@
+torch==2.12.1
+torchvision==0.27.1
+nnunetv2==2.8.1
+SimpleITK==2.5.5
+scipy==1.15.3
+scikit-image==0.25.2
+numpy==2.2.6
+batchgenerators==0.25.3
+batchgeneratorsv2==0.3.4
+dynamic-network-architectures==0.4.4
+nibabel==5.4.2
+pandas==2.3.3
+scikit-learn==1.7.2

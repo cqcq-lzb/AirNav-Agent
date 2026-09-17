@@ -1,0 +1,26 @@
+Airway Navigation Complete GPU Backend
+======================================
+
+Image: airway-navigation:latest
+Image ID: sha256:0239caecfadc7dae08275ef498a962beb65538e9796102a55196b0d4cfb4833d
+Image size: 8865703836 bytes
+Validated host: 192.168.8.41, NVIDIA H100 PCIe
+Validated API port: 18000
+Validated job: 3e0dfc6c472e464d8f0f2432f590cd0c
+Validated result: succeeded / complete
+
+Portable export on the H100 server:
+  /data2/home/wcq/airway_gpu_backend_bundle/airway-navigation-h100.tar.gz
+SHA-256:
+  9cd550b4e4a73741dc00c9435e198f06a0941bc6fd73c97ab46a7c68d3279600
+
+Verified in the running container:
+- Only physical GPU 3 is allocated; it appears as GPU 0 inside the container.
+- nnU-Net environment: PyTorch 2.12.1+cu130, CUDA available.
+- MANet environment: PyTorch 2.4.1+cu121, CUDA available.
+- MANet native C++ box extension imports successfully.
+- Dataset520 airway model and MANet checkpoint are present.
+- Shared memory is 8 GiB for nnU-Net multiprocessing.
+- A real LIDC_0029 CT completed airway segmentation, MANet nodule
+  segmentation, quality control, navigation planning, and package export.
+- The downloaded stage-4 ZIP passed unzip integrity validation.

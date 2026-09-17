@@ -1,0 +1,5 @@
+FROM airway-navigation-gpu-backend:2.0
+
+RUN cd /data2/home/wcq/projects/MANet-main/scripts/build/box && \
+    /data0/home/wcq/.conda/envs/nodulenet_h100/bin/pip install wheel && \
+    /data0/home/wcq/.conda/envs/nodulenet_h100/bin/pip install --no-build-isolation .

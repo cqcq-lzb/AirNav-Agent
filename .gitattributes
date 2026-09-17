@@ -1,0 +1,72 @@
+# ============================================================
+# AirNav-Agent .gitattributes
+#
+# 行尾策略：由仓库配置 core.autocrlf=false 保证「默认不做任何行尾转换」，
+#           仓库内字节与工作区文件一致，不会因平台产生伪 diff。
+#           本文件只做两件事：
+#             1) 显式标注二进制类型，避免 git 对它们做文本 diff
+#             2) 对必须 CRLF 的 Windows 批处理强制行尾，防止跨平台编辑后被改成 LF
+# ============================================================
+
+# ---------- 行尾不做特殊处理 ----------
+# 实测本仓库的 .bat / .cmd 在工作区本来就是 LF 行尾，且 Windows cmd.exe 能正常执行
+# （用户一直在用这些 .bat 启动 Docker 后端与 Agent）。
+# 若在此声明 `*.bat text eol=crlf`，git add 时会把 12 个批处理转成 CRLF，
+# 于是「首次提交还没提交完，就已经产生一批行尾改动」，污染归因基线。
+# 因此统一交给 core.autocrlf=false：不转换，字节保真。
+
+# ---------- 图像 ----------
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.bmp   binary
+*.tif   binary
+*.tiff  binary
+*.webp  binary
+
+# ---------- 医学影像 ----------
+*.dcm    binary
+*.nii    binary
+*.nii.gz binary
+*.nrrd   binary
+*.mha    binary
+*.mhd    binary
+
+# ---------- 网格 / 点云 / 体积 ----------
+*.stl binary
+*.obj binary
+*.ply binary
+*.vtk binary
+*.vti binary
+*.vtp binary
+*.npz binary
+*.npy binary
+*.pkl binary
+
+# ---------- 模型权重 ----------
+*.pt   binary
+*.pth  binary
+*.onnx binary
+*.h5   binary
+*.pb   binary
+*.ckpt binary
+*.safetensors binary
+
+# ---------- 归档 ----------
+*.zip  binary
+*.tar  binary
+*.gz   binary
+*.tgz  binary
+*.7z   binary
+*.rar  binary
+
+# ---------- 文档 / 字体 ----------
+*.pdf  binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.ttf  binary
+*.otf  binary
+*.woff binary
+*.woff2 binary

@@ -1,0 +1,59 @@
+# ============================================================
+# 经支气管肺结节自动导航系统 v3.2 —— Compose 编排
+#
+# 用法（在 docker/ 目录内执行）：
+#     docker compose build        构建镜像
+#     docker compose up -d        后台启动
+#     docker compose logs -f      查看日志
+#     docker compose down         停止并移除容器
+#
+# 界面访问：http://localhost:6080/vnc.html
+# ============================================================
+
+services:
+  airway-navigation:
+    build:
+      # 构建上下文必须是仓库根目录（需要 segmentation_optimization 作为同级目录）
+      context: ../..
+      dockerfile: airway_navigation_system_v3_2_complete/docker/Dockerfile
+    image: airway-navigation-v3:3.2
+    container_name: airway-navigation-v3
+    restart: unless-stopped
+
+    # Qt / VTK 共享内存，偏大一些可减少渲染崩溃
+    shm_size: "1gb"
+
+    ports:
+      - "6080:6080"   # noVNC 网页界面（推荐）
+      - "5900:5900"   # 原生 VNC（可选，用 VNC Viewer 直连）
+
+    environment:
+      START_XVFB: "1"
+      # 窗口管理器：让导航界面自动最大化铺满整屏（设 0 则保持 1060x760 原始尺寸）
+      START_WM: "1"
+      START_VNC: "1"
+      # 虚拟屏分辨率，可按显示器比例调整（如 1600x900x24）
+      XVFB_SCREEN: "1920x1080x24"
+      # 容器内没有 GPU 直通，强制使用 Mesa 软件渲染
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: "llvmpipe"
+      QT_QPA_PLATFORM: "xcb"
+      QT_X11_NO_MITSHM: "1"
+      # 需要 VNC 密码时取消下一行注释
+      # VNC_PASSWORD: "airway123"
+
+    volumes:
+      # 运行期病例包（与原来的 D:\airway_navigation_v1\...\cases 是同一个目录）
+      - ../cases:/opt/airway_navigation_v1/airway_navigation_system_v3_2_complete/cases
+      # 需要上传的 CT 文件放这里：D:\airway_navigation_v1\docker_shared
+      - ../../docker_shared:/data/ct_input
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # 软件渲染较吃 CPU，按机器规格调整
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6g
