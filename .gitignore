@@ -68,6 +68,12 @@ outputs/gate/
 outputs/eval/gate_eval.json
 outputs/eval/gate_eval.md
 
+# 审计日志：属于**运行现场**（谁在什么时候对哪个病例做了什么），不入库。
+# 它是证据不是源码 —— 而且逐日追加的文件在 git 里必然制造无意义 diff。
+# 要留证时用 `audit_query.py --csv` 导出，把需要的那一份拷进 docs/。
+# 自检与门禁都会把 AIRNAV_AUDIT_DIR 指到临时目录，所以跑回归不会写这里。
+outputs/audit/
+
 # ---------- Docker ----------
 # 镜像归档（313M + 63M）
 docker/*.tar

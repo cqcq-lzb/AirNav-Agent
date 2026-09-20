@@ -37,17 +37,23 @@ import asyncio
 import json
 import os
 import threading
+import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.routing import Route
 
+from .. import audit
 from ..agent_loop import NavAgent
 from ..llm.client import PRESETS, OpenAICompatClient
 from ..render.viewer import viewers_dir
 from ..tools import NavSession, build_registry
+from .auth import TokenAuthMiddleware, actor, client_ip, login_page, status_line, user_agent
 
 ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -122,6 +128,14 @@ def _make_client(backend: str, model: str | None = None):
     return OpenAICompatClient.from_preset(backend, model=model)
 
 
+def _default_model(backend: str) -> str | None:
+    """审计里要记「实际生效的模型」而不是「页面选的预设」。"""
+    preset = PRESETS.get(backend)
+    if isinstance(preset, dict):
+        return preset.get("model")
+    return backend
+
+
 def _collect_artifacts(session: NavSession) -> list[dict[str, Any]]:
     """把本次会话产生的产物整理成前端能直接渲染的列表。
 
@@ -144,6 +158,53 @@ def _collect_artifacts(session: NavSession) -> list[dict[str, Any]]:
 def _sse(event: dict[str, Any]) -> str:
     """一条 SSE 帧。ensure_ascii=False —— 中文直接进报文，前端不用二次解码。"""
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+# ------------------------------------------------------------------ 审计
+
+
+def _short(value: Any, limit: int = 120) -> Any:
+    """审计里只留能看懂的最小信息：长字符串截断，大对象只记类型。
+
+    审计要的是「可追溯」，不是把上下文再存一遍 —— 几何大对象绝不进审计。
+    """
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + f"…(+{len(value) - limit})"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return f"<{type(value).__name__} len={len(value)}>"
+    if isinstance(value, dict):
+        return {k: _short(v, limit) for k, v in list(value.items())[:12]}
+    return f"<{type(value).__name__}>"
+
+
+def _audit_steps(run: Any) -> list[dict[str, Any]]:
+    """从完整调用记录里抽出工具链（用 registry_calls 而不是截断过的 trace）。"""
+    if run is None:
+        return []
+    return [
+        {
+            "step": record.get("step"),
+            "tool": record.get("tool"),
+            "args": _short(record.get("arguments") or {}),
+            "ok": record.get("ok"),
+            "elapsed_ms": record.get("elapsed_ms"),
+            "error": _short(record.get("error")) if record.get("error") else None,
+        }
+        for record in run.registry_calls()
+    ]
+
+
+def _audit_case_ids(items: list[dict[str, Any]], run: Any) -> list[str]:
+    """病例 ID 两路取：产物 meta，以及工具入参里的 `case_id`。"""
+    found = {item.get("case_id") for item in items if item.get("case_id")}
+    if run is not None:
+        for record in run.registry_calls():
+            value = (record.get("arguments") or {}).get("case_id")
+            if value:
+                found.add(str(value))
+    return sorted(str(item) for item in found if item)
 
 
 # ------------------------------------------------------------------ 路由
@@ -236,6 +297,13 @@ async def api_chat(request) -> Any:
         push(event)
 
     def worker() -> None:
+        run_id = uuid.uuid4().hex
+        started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        started = time.time()
+        run = None
+        items: list[dict[str, Any]] = []
+        verdict = "error"
+        error_text: str | None = None
         try:
             session = NavSession(
                 root=cases_root,
@@ -253,22 +321,59 @@ async def api_chat(request) -> Any:
             )
             run = agent.run(question)
 
-            push({"type": "artifacts", "items": _collect_artifacts(session)})
+            items = _collect_artifacts(session)
+            push({"type": "artifacts", "items": items})
             for event in held:
                 push(event)
             # 完整留痕单独发一份，供「下载本次运行记录」这类用途
             push({"type": "run", "data": run.to_dict()})
+            # answered 才算 ok；其他 stop_reason（如 unresolved_intent）如实记下，
+            # 审计要能区分「一次答对」和「催了才答对」
+            verdict = "ok" if run.stop_reason == "answered" else (run.stop_reason or "unknown")
         except Exception as error:  # noqa: BLE001 - 任何异常都要变成事件，不能只留 traceback
+            error_text = f"{type(error).__name__}: {error}"
             for event in held:
                 push(event)
             push(
-                {"type": "error", "message": f"{type(error).__name__}: {error}"}
+                {"type": "error", "message": error_text}
             )
         finally:
+            # 审计写在服务端收尾处，**agent 内核零改动**（观测层不碰控制流）。
+            # 写失败只打 stderr，绝不影响已经推给用户的回答。
+            audit.record_run(
+                run_id=run_id,
+                started_at=started_at,
+                elapsed_s=round(time.time() - started, 2),
+                question=question,
+                answer=run.answer if run is not None else None,
+                backend=backend,
+                model=model or _default_model(backend),
+                verdict=verdict,
+                error=error_text,
+                actor=actor_name,
+                client_ip=ip,
+                user_agent=ua,
+                params={
+                    "max_steps": max_steps,
+                    "device_diameter_mm": device_diameter,
+                    "device_margin_mm": device_margin,
+                    "use_cache": use_cache,
+                    "stop_reason": run.stop_reason if run is not None else None,
+                    "steps": len(run.steps) if run is not None else None,
+                    "intent_corrections": run.intent_corrections if run is not None else None,
+                },
+                steps=_audit_steps(run),
+                artifacts=items,
+                case_ids=_audit_case_ids(items, run),
+            )
             push({"type": "done"})
 
-    threading.Thread(target=worker, name="airnav-agent", daemon=True).start()
+    # 鉴权信息在请求线程里取好再交给后台线程（scope 只在请求生命周期内可靠）
+    actor_name = actor()
+    ip = client_ip(request.scope)
+    ua = user_agent(request.scope)
 
+    threading.Thread(target=worker, name="airnav-agent", daemon=True).start()
     async def stream() -> Iterator[str]:
         while True:
             event = await queue.get()
@@ -314,9 +419,14 @@ routes = [
     Route("/api/meta", api_meta),
     Route("/api/chat", api_chat),
     Route("/artifacts/{name}", artifact),
+    # 登录页：GET 出表单，POST 校验后种 Cookie。
+    # 用 Cookie 而不是自定义头，是因为 `EventSource` 不能自定义请求头 ——
+    # 浏览器原生带 Cookie 才能在 SSE 场景下免改协议地鉴权。
+    Route("/login", login_page, methods=["GET", "POST"]),
 ]
 
-app = Starlette(routes=routes)
+# 纯 ASGI 中间件：未命中拒绝分支时零介入透传（见 auth.py 的说明）
+app = Starlette(routes=routes, middleware=[Middleware(TokenAuthMiddleware)])
 
 
 def main() -> int:
@@ -326,6 +436,8 @@ def main() -> int:
     print("AirNav-Agent 网页版")
     print(f"  地址   http://{DEFAULT_HOST}:{DEFAULT_PORT}")
     print(f"  后端   {DEFAULT_BACKEND}（页面右上角可改）")
+    print(f"  鉴权   {status_line()}")
+    print(f"  审计   {audit.audit_dir()}")
     print(f"  viewer {_viewers_dir()}")
     print("  Ctrl+C 停止")
     print("=" * 66)

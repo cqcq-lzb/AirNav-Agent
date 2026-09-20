@@ -123,6 +123,18 @@
   dialog#vw .bar button{padding:5px 12px;border:1px solid var(--line);border-radius:6px;
     background:#fff;cursor:pointer;font-size:12px}
   dialog#vw iframe{width:100%;height:calc(100% - 44px);border:0;display:block}
+
+  /* 登录浮层。用 <dialog> 而不是自绘遮罩：Esc 关闭、焦点陷阱、::backdrop 都是原生的。 */
+  dialog#lg{width:min(340px,92vw);border:0;border-radius:12px;padding:0;
+    background:var(--panel);box-shadow:0 12px 40px rgba(20,30,45,.28)}
+  dialog#lg::backdrop{background:rgba(20,30,45,.5)}
+  dialog#lg .lgbody{padding:20px 22px 22px;display:flex;flex-direction:column;gap:10px}
+  dialog#lg h2{margin:0;font-size:14px;font-weight:600}
+  dialog#lg p{margin:0;font-size:12px;color:var(--tx-2);line-height:1.6}
+  dialog#lg input{height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#fff}
+  dialog#lg button{height:34px;border:0;border-radius:8px;background:var(--accent);
+    color:#fff;font-weight:600;cursor:pointer}
+  dialog#lg .lgerr{color:var(--bad);font-size:12px;min-height:16px}
 </style>
 </head>
 <body>
@@ -177,6 +189,21 @@
     <button id="vwclose" type="button">关闭</button>
   </div>
   <iframe id="vwframe" src="about:blank" title="三维导航视图"></iframe>
+</dialog>
+
+<!--
+  鉴权（P0）。页面壳 `GET /` 是公开的 —— 它只是空壳，不含任何病例数据；
+  真正的数据面 `/api/*` 与 `/artifacts/*` 全部鉴权。所以「没登录」不是在打开
+  页面时发现的，而是在**取数据**时由服务端的 401 告诉我们的，见下面的 showLogin()。
+-->
+<dialog id="lg">
+  <form class="lgbody" id="lgform">
+    <h2>需要访问令牌</h2>
+    <p>病例、路径规划与三维视图都属受保护数据，鉴权后才可用。令牌问运维要。</p>
+    <input id="lgtoken" type="password" placeholder="访问令牌" autocomplete="off">
+    <div class="lgerr" id="lgerr"></div>
+    <button type="submit">进入</button>
+  </form>
 </dialog>
 
 <script>
@@ -314,8 +341,34 @@
   }
   function scrollDown(){ log.scrollTop = log.scrollHeight; }
 
+  // ---------- 鉴权 ----------
+  // 一律以服务端返回的 401 为准，不在前端猜「有没有登录」—— 前端没有可信的
+  // 登录态来源（Cookie 是 HttpOnly 的，脚本读不到）。这也是设计上想要的：
+  // 登录态只由服务端判定，前端只是它的显示器。
+  const lg = $("lg");
+  function showLogin(msg){
+    $("lgerr").textContent = msg || "";
+    $("sub").textContent = "未登录";
+    if (!lg.open) lg.showModal();
+    $("lgtoken").focus();
+  }
+  function authProbe(){
+    // SSE 的 onerror 拿不到状态码（EventSource 不暴露），只能另发一个探针请求
+    // 去分辨「没登录 / 会话过期」和「服务真的挂了」——
+    // 这两件事的处理完全不同，混成一句「连接中断」会把排查方向带偏。
+    // 探针本身失败（服务确实挂了）时返回 false，落到「连接中断」那一支。
+    return fetch("/api/meta", {cache: "no-store"}).then(
+      (r) => r.status === 401,
+      () => false
+    );
+  }
+
   // ---------- 初始化 ----------
-  fetch("/api/meta").then(r => r.json()).then(meta => {
+  fetch("/api/meta").then(r => {
+    if (r.status === 401){ showLogin(""); return null; }
+    return r.json();
+  }).then(meta => {
+    if (!meta) return;   // 未登录：留在登录浮层上，不再往下初始化
     backendDefault = meta.default_backend;
     const sel = $("backend");
     sel.innerHTML = "";
@@ -555,8 +608,15 @@
     };
 
     es.onerror = function(){
-      // 服务端正常收尾也会走到这里，finished 已经把这情况挡掉了
-      finish("连接中断（服务是否还在运行？）");
+      // 服务端正常收尾也会走到这里，finished 已经把这情况挡掉了。
+      if (finished) return;
+      // 被 401 拒掉时同样走这里，而且**拿不到状态码** —— 探一下再决定怎么说。
+      authProbe().then(is401 => {
+        if (!is401){ finish("连接中断（服务是否还在运行？）"); return; }
+        // 会话过期：先把浮层顶出来，再照常收尾（不额外报错，浮层已经说清楚了）
+        showLogin("会话已过期，请重新登录");
+        finish(null);
+      });
     };
   }
 
@@ -569,6 +629,23 @@
   $("q").addEventListener("keydown", function(ev){
     if (ev.key === "Enter" && !ev.shiftKey){ ev.preventDefault(); $("composer").requestSubmit(); }
   });
+  // ---------- 登录提交 ----------
+  $("lgform").addEventListener("submit", function(ev){
+    ev.preventDefault();
+    const t = $("lgtoken").value.trim();
+    if (!t){ $("lgerr").textContent = "请填令牌"; return; }
+    const fd = new FormData();
+    fd.append("token", t);
+    // 服务端成功回 303（PRG 模式）：cookie 随这次响应种下，follow 之后拿到 `/` 的 200。
+    // 失败回 401 且不重定向 —— 就地报错，用户不必离开页面再回来。
+    fetch("/login", {method: "POST", body: fd}).then(r => {
+      if (r.ok){ location.reload(); return; }
+      $("lgerr").textContent = "令牌不对";
+      $("lgtoken").value = "";
+      $("lgtoken").focus();
+    }).catch(e => { $("lgerr").textContent = "请求失败：" + e; });
+  });
+
   window.addEventListener("load", () => $("q").focus());
 })();
 </script>

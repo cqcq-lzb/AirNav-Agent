@@ -27,6 +27,16 @@
 把这一轮的**真回答 + 真产物表**喂给 `index.html` 里那段真函数，
 验证用户点得到，而不是只在 fixture 上成立。
 
+## 服务开了鉴权怎么办（P0 之后）
+
+服务端设了 `AIRNAV_API_TOKEN` 时，本探针也要带凭据：
+
+    set AIRNAV_API_TOKEN=<令牌>
+    python -m agent.scripts.probe_web --port 8777
+
+**优先用环境变量而不是 `--token`** —— 命令行参数会进 shell 历史。
+没带凭据时的表现是明确的 401 提示，不是「打不通」。
+
 ## 说明
 
 - 需要**服务已启动**（`python -m agent.web.server`）与**真模型可达**，所以它不进
@@ -38,7 +48,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -57,7 +69,15 @@ def main() -> int:
     parser.add_argument("--device-diameter", default="1.5")
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     parser.add_argument("--dump", default=None, help="把回答与产物表写成 JSON")
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="访问令牌；默认读环境变量 AIRNAV_API_TOKEN（比写在命令行里安全 —— "
+             "不会进 shell 历史）",
+    )
     args = parser.parse_args()
+
+    token = args.token or os.environ.get("AIRNAV_API_TOKEN") or ""
 
     url = (
         f"http://{args.host}:{args.port}/api/chat?"
@@ -71,9 +91,19 @@ def main() -> int:
     )
     # 本机 http_proxy 会劫持 127.0.0.1，必须绕开
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(url)
+    if token:
+        # 走请求头而不是 Cookie：脚本这边最省事，且和后端的 API Key 同一个面
+        request.add_header("X-API-Key", token)
     try:
-        with opener.open(url, timeout=300) as resp:
+        with opener.open(request, timeout=300) as resp:
             raw_lines = resp.readlines()
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            print(f"401 需要访问令牌 —— 设 AIRNAV_API_TOKEN 或用 --token 传（服务端开启了鉴权）")
+        else:
+            print(f"HTTP {error.code}：{error.reason}")
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(f"打不通 http://{args.host}:{args.port} —— 服务起了吗？（{exc}）")
         return 1

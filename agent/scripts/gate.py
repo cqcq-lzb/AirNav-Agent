@@ -2,8 +2,8 @@
 
 ## 为什么要有个统一入口
 
-自检脚本已经攒到九套（几何对拍 / 规划数值一致性 / 循环控制流 / 工具返回体契约 /
-网页端 / 界面路径 / MCP 协议 / 打分器自检 / 评测基线），但**没人会记着全跑一遍**。
+自检脚本已经攒到十套（几何对拍 / 规划数值一致性 / 循环控制流 / 工具返回体契约 /
+网页端 / 界面路径 / MCP 协议 / 打分器自检 / 评测基线 / 审计日志），但**没人会记着全跑一遍**。
 门禁的价值不在「多了一个脚本」，而在把「改动前先过回归」从一个习惯变成一条命令 ——
 习惯会忘，命令不会。
 
@@ -114,9 +114,15 @@ def _checks() -> list[Check]:
         ),
         Check(
             key="web",
-            title="网页端（含产物 URL 与目录穿越防护）",
+            title="网页端（含鉴权、产物 URL 与目录穿越防护）",
             argv=["-m", "agent.scripts.check_web"],
             category="界面",
+        ),
+        Check(
+            key="audit",
+            title="审计日志（哈希链 · 篡改必被检出）",
+            argv=["-m", "agent.scripts.check_audit"],
+            category="治理",
         ),
         Check(
             key="ui_paths",
@@ -217,6 +223,9 @@ def _child_env(scratch: Path, check: Check) -> dict[str, str]:
         env.pop("PYTHONNOUSERSITE", None)
     # 自检渲染走临时目录：证据归证据，交付物归交付物
     env["AIRNAV_VIEWER_DIR"] = str(scratch)
+    # 审计同理：自检写下的 run/auth 记录属于**证据**，不该混进 outputs/audit/
+    # （否则「跑了多少次门禁」会污染真正需要保留的运行留痕）
+    env["AIRNAV_AUDIT_DIR"] = str(scratch / "audit")
     return env
 
 
