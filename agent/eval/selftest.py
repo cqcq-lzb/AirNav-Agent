@@ -34,6 +34,7 @@ from ..agent_loop import AgentRun, AgentStep
 from ..rag import get_retriever
 from .cases import case_by_id
 from .graders import GradeResult, grade_case
+from .paraphrase import PARAPHRASE_CASES, audit as audit_paraphrases, leaked_keywords
 
 
 def make_run(
@@ -444,6 +445,25 @@ def main() -> int:
         print(f"  PASS  {label} -> 被 {expected_grader} 检出")
         print(f"          {failed[expected_grader][0].detail[:110]}")
 
+    print("\n[3] 同义改写集：题面必须绕开规则基线的关键词表，判定字段必须与基准逐字段一致")
+    paraphrase_problems = audit_paraphrases()
+    if paraphrase_problems:
+        failures.extend(paraphrase_problems)
+        for problem in paraphrase_problems:
+            print(f"  FAIL  {problem}")
+    else:
+        for case in PARAPHRASE_CASES:
+            base = case_by_id(case.id.replace("P-", "-", 1))
+            print(
+                f"  PASS  {case.id}"
+                f"（判定字段与 {base.id} 一致；"
+                f"题面残留关键词 {leaked_keywords(case.question) or '无'}）"
+            )
+        print(
+            f"  —— {len(PARAPHRASE_CASES)} 条改写全部干净："
+            "规则基线在它们上面拿不到任何关键词信号"
+        )
+
     print("\n" + "=" * 72)
     if failures:
         print(f"自检未通过，共 {len(failures)} 项异常：")
@@ -452,7 +472,8 @@ def main() -> int:
         return 1
     print(
         f"自检通过：{len(GOOD_FIXTURES)} 份正常轨迹全部通过，"
-        f"{len(BAD_FIXTURES)} 份缺陷轨迹全部被对应打分器检出"
+        f"{len(BAD_FIXTURES)} 份缺陷轨迹全部被对应打分器检出，"
+        f"{len(PARAPHRASE_CASES)} 条同义改写与基准逐字段一致"
     )
     return 0
 
