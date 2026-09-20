@@ -1,0 +1,53 @@
+name: regression gate
+
+# 回归门禁：把「改动前先过回归」从习惯变成流水线。
+#
+# ⚠️ 已知边界（别假装没有）：
+#   1. `cases/`（1.9GB 真实病例）**不入库**（隐私 + 体积，见 .gitignore），
+#      所以全新 clone 里 verify_planner / verify_payloads / run_eval 跑不了。
+#      本工作流因此只跑 `--profile ci`（不依赖病例数据的子集）。
+#      想在 CI 上跑全量，必须提供脱敏 fixture 或自建 runner —— 属待办，不属已完成。
+#   2. 评测基线用的是 `heuristic` 规则基线后端：确定性、不联网、不需要 GPU。
+#      真模型评测（gpu41 / qwen2.5:14b）依赖内网与 GPU，留在本地手动跑。
+#
+# 仓库当前没有配置 git remote（`git remote -v` 为空），此文件是为将来接远端准备的；
+# 现在真正在用的是 `跑回归门禁.bat` / `python -m agent.scripts.gate`。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install runtime deps for offline checks
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy starlette uvicorn
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run regression gate (ci profile)
+        run: python -m agent.scripts.gate --profile ci
+
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-report
+          path: outputs/gate/gate_report.*
+          if-no-files-found: warn

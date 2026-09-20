@@ -75,6 +75,20 @@ def _output_root() -> Path:
     return Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR
 
 
+def viewers_dir() -> Path:
+    """产物的落盘根目录 —— **服务端与渲染端必须用同一个来源**。
+
+    `agent/web/server.py` 的 `/artifacts/<name>` 就靠它定位文件。以前那里硬编码了
+    `outputs/viewers`，于是当渲染端被 `AIRNAV_VIEWER_DIR` 改到临时目录时
+    （门禁与自检就是这么做的，为的是不碰入库的演示产物），
+    服务端还在老地方找 —— 结果是「渲染成功但 URL 404」。
+
+    这不是测试的问题，是**两处各自维护了一份真相**。2026-09-20 修：
+    服务端改为调用本函数，两边永远一致。
+    """
+    return _output_root()
+
+
 def use_scratch_output(tag: str = "selftest") -> Path:
     """把**本进程**的 viewer 输出改到临时目录，并返回该目录。
 

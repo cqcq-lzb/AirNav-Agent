@@ -46,11 +46,22 @@ from starlette.routing import Route
 
 from ..agent_loop import NavAgent
 from ..llm.client import PRESETS, OpenAICompatClient
+from ..render.viewer import viewers_dir
 from ..tools import NavSession, build_registry
 
 ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-VIEWERS_DIR = ROOT / "outputs" / "viewers"
+
+
+def _viewers_dir() -> Path:
+    """产物落盘/提供的**唯一真相源**，与渲染端共用（`render.viewer.viewers_dir`）。
+
+    ⚠️ 这里以前是硬编码 `ROOT/"outputs"/"viewers"`。渲染端支持
+    `AIRNAV_VIEWER_DIR` 改写到临时目录（门禁与自检都这么做，以免碰入库的演示产物），
+    服务端却还在老地方找 —— 症状是「viewer 渲染成功，但 /artifacts 404」。
+    两边共用一个来源之后，无论渲染到哪，服务端都能找到。
+    """
+    return viewers_dir()
 
 DEFAULT_HOST = os.environ.get("AIRNAV_WEB_HOST") or "127.0.0.1"
 DEFAULT_PORT = int(os.environ.get("AIRNAV_WEB_PORT") or 8777)
@@ -125,7 +136,7 @@ def _collect_artifacts(session: NavSession) -> list[dict[str, Any]]:
             name = Path(path).name
             record["url"] = f"/artifacts/{name}"
             record["filename"] = name
-            record["exists"] = (VIEWERS_DIR / name).is_file()
+            record["exists"] = (_viewers_dir() / name).is_file()
         items.append(record)
     return items
 
@@ -170,7 +181,7 @@ async def api_meta(request) -> JSONResponse:
             "backends": list(PRESETS) + list(EXTRA_BACKENDS),
             "default_backend": DEFAULT_BACKEND,
             "backend_labels": labels,
-            "viewer_dir": str(VIEWERS_DIR),
+            "viewer_dir": str(_viewers_dir()),
         }
     )
 
@@ -281,14 +292,15 @@ async def artifact(request) -> Any:
     """提供 outputs/viewers 下的产物。
 
     ⚠️ 这里必须防目录穿越：只看 basename，再校验解析后的真实路径确实落在
-    VIEWERS_DIR 里。只允许 .html / .json 两种后缀。
+    产物根目录里。只允许 .html / .json 两种后缀。
     """
+    root = _viewers_dir()
     name = Path(request.path_params["name"]).name
     if not name or not name.endswith(ALLOWED_ARTIFACT_SUFFIXES):
         return JSONResponse({"error": "不支持的文件类型"}, status_code=400)
 
-    target = (VIEWERS_DIR / name).resolve()
-    if VIEWERS_DIR.resolve() not in target.parents or not target.is_file():
+    target = (root / name).resolve()
+    if root.resolve() not in target.parents or not target.is_file():
         return JSONResponse({"error": "文件不存在"}, status_code=404)
 
     media = "text/html; charset=utf-8" if name.endswith(".html") else "application/json"
@@ -314,7 +326,7 @@ def main() -> int:
     print("AirNav-Agent 网页版")
     print(f"  地址   http://{DEFAULT_HOST}:{DEFAULT_PORT}")
     print(f"  后端   {DEFAULT_BACKEND}（页面右上角可改）")
-    print(f"  viewer {VIEWERS_DIR}")
+    print(f"  viewer {_viewers_dir()}")
     print("  Ctrl+C 停止")
     print("=" * 66)
     uvicorn.run(app, host=DEFAULT_HOST, port=DEFAULT_PORT, log_level="warning")

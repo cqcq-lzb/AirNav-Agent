@@ -61,6 +61,13 @@ requirements_mcp_env.txt
 # 截图 25M：由 demo_scripted / render_viewer 随时重建，不入库
 outputs/shots/
 
+# 回归门禁报告：每跑一次门禁就重写（含时间戳与耗时），入库必然制造无意义 diff。
+# 结论要留证时贴进提交信息，或把某一版报告拷进 docs/ —— 这个目录不入库。
+outputs/gate/
+# 门禁自己那次评测的输出（同理，每次重算的中间产物）
+outputs/eval/gate_eval.json
+outputs/eval/gate_eval.md
+
 # ---------- Docker ----------
 # 镜像归档（313M + 63M）
 docker/*.tar
