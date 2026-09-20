@@ -166,13 +166,16 @@ def warnings_for(case: CaseContext, plan: RoutePlan, device_diameter_mm: float) 
 # ------------------------------------------------------------------ 产物命名
 
 
-def _param_tag(
+def param_tag(
     device_diameter_mm: float | None, profile: str | None, mesh_step: int
 ) -> str:
     """把**会影响视图内容**的参数压成文件名后缀。
 
     只编码这三个：器械外径（决定器械管与余量着色）、代价配置（决定走的是哪条路）、
     网格步长（决定气道表面精度）。安全余量这类固定值不入名，免得名字失控。
+
+    公开而不是私有：`agent/scripts/clinical_report.py` 也要按同一口径给报告产物起名
+    —— 命名只有一套，否则「这份报告对应的就是那份视图」只能靠人去认。
     """
     parts: list[str] = []
     device = float(device_diameter_mm or 0.0)
@@ -205,7 +208,7 @@ def _auto_filename(
     参数对不上才启用带后缀的新名字。
     """
     base = f"viewer_{case_id}_c{candidate_id}"
-    tag = _param_tag(device_diameter_mm, profile, mesh_step)
+    tag = param_tag(device_diameter_mm, profile, mesh_step)
     if not tag:
         return f"{base}.html"
     if _legacy_params_match(
@@ -343,6 +346,7 @@ def render_from_case_id(
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
     "ViewerOutput",
+    "param_tag",
     "render_case_viewer",
     "render_from_case_id",
     "use_scratch_output",

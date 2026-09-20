@@ -141,6 +141,15 @@ def _checks() -> list[Check]:
             category="治理",
         ),
         Check(
+            key="clinical",
+            title="临床报告（参数与页面逐位一致 · 打印不留白框）",
+            argv=["-m", "agent.scripts.check_clinical"],
+            # 夹具是 outputs/viewers/ 里入库的 sidecar（JSON），不需要 cases/，
+            # 但**没有它们就没法验「参数与页面所见一致」**，所以自检会明确报错而不是静默跳过
+            needs_cases=False,
+            category="临床",
+        ),
+        Check(
             key="ui_paths",
             title="界面路径替换（真回答 → 可点按钮）",
             argv=["agent/scripts/check_ui_paths.js"],
