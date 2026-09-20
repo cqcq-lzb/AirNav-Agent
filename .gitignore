@@ -74,6 +74,10 @@ outputs/eval/gate_eval.md
 # 自检与门禁都会把 AIRNAV_AUDIT_DIR 指到临时目录，所以跑回归不会写这里。
 outputs/audit/
 
+# 运行与合规报告：每次生成都带新的时间戳与链尾哈希，入库必然 churn。
+# 要留证时把某一版拷进 docs/ —— 报告是**某一时刻的快照**，留在原地才有意义。
+outputs/reports/
+
 # ---------- Docker ----------
 # 镜像归档（313M + 63M）
 docker/*.tar

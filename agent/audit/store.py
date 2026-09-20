@@ -255,8 +255,20 @@ def record_phi_scan(
 # ------------------------------------------------------------------ 读取与校验
 
 
+def _resolve_paths(paths: Iterable[Path] | None) -> list[Path]:
+    """``None`` = 全部日志；**空集合 = 一条都不选**。
+
+    别写成 `paths or list_logs()`：那样「筛完一条不剩」会被当成「没指定」，
+    于是拿**全量**去跑 —— 静默地把「报告期内无记录」变成「报告期内有全部记录」。
+    这类 falsy 陷阱在调用方完全看不出来，故显式区分。
+    """
+    if paths is None:
+        return list_logs()
+    return [Path(item) for item in paths]
+
+
 def iter_records(paths: Iterable[Path] | None = None) -> Iterator[dict[str, Any]]:
-    for path in paths or list_logs():
+    for path in _resolve_paths(paths):
         if not path.is_file():
             continue
         with path.open("r", encoding="utf-8") as handle:
@@ -270,10 +282,15 @@ def iter_records(paths: Iterable[Path] | None = None) -> Iterator[dict[str, Any]
 
 
 def verify_chain(paths: Iterable[Path] | None = None) -> tuple[bool, list[str]]:
-    """逐条重算哈希链。返回 (是否完整, 问题列表)。"""
+    """逐条重算哈希链。返回 (是否完整, 问题列表)。
+
+    每个文件独立成链（从 `GENESIS` 起），因为日志按天切片 —— 某天删掉整份文件
+    不会让后面的天全部对不上。**代价**：删掉某天的一整份日志是看不出来的，
+    这正是 `audit_verify` 文档里说的「链尾哈希要另存」的原因。
+    """
     problems: list[str] = []
     prev = GENESIS
-    for path in paths or list_logs():
+    for path in _resolve_paths(paths):
         if not path.is_file():
             continue
         prev = GENESIS
