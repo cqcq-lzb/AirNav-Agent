@@ -555,6 +555,31 @@ def layer_4_auth() -> int:
     return failures
 
 
+def _check_element_ids(html: str, script: str) -> tuple[bool, str]:
+    """内联 JS 引用的元素 id，必须在 HTML 里真的存在。
+
+    ## 为什么值得单开一条
+
+    `$("lgerr")` 写成 `$("lgErr")` 时，**现有所有测试都会全绿**：
+    JS 语法没问题、路径替换没问题、HTTP 层更看不出 —— 直到用户在浏览器里
+    点开登录浮层，代码在那行抛 `Cannot read properties of null`。
+
+    这类「拼错的 id」是纯静态可判定的，所以不该留给运行时。之前几轮改动里
+    新增了整块登录浮层的 DOM（`lg` / `lgform` / `lgtoken` / `lgerr`），
+    正是最容易错的地方。
+
+    只做**子集校验**（引用的 ⊆ 定义的），不反过来要求每个 id 都被用到 ——
+    给 CSS 留锚点是正常的。
+    """
+    defined = set(re.findall(r"""\bid\s*=\s*["']([^"']+)["']""", html))
+    referenced = set(re.findall(r"""\$\(\s*["']([^"']+)["']\s*\)""", script))
+    referenced |= set(re.findall(r"""getElementById\(\s*["']([^"']+)["']\s*\)""", script))
+    missing = sorted(referenced - defined)
+    if missing:
+        return False, f"引用了不存在的 id：{missing}（HTML 里定义的有 {len(defined)} 个）"
+    return True, f"引用 {len(referenced)} 个 id，全部存在"
+
+
 # ------------------------------------------------------------------ 服务生命周期
 
 
@@ -583,6 +608,11 @@ def layer_5_ui_script(node: str) -> int:
     script = _extract_inline_script(html)
     if not check(script is not None, "能在 index.html 里定位内联 <script> 块"):
         return 1
+
+    # 元素 id 交叉校验：拼错 id 是现有测试全都看不见的失效模式（见函数注释）
+    ok_ids, detail = _check_element_ids(html, script)
+    if not check(ok_ids, "内联 JS 引用的元素 id 在 HTML 里都存在", detail):
+        failures += 1
 
     with tempfile.TemporaryDirectory() as tmp:
         js_file = Path(tmp) / "inline.js"
