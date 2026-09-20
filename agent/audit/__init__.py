@@ -8,6 +8,7 @@ from .store import (
     log_path,
     query,
     record_auth,
+    record_phi_scan,
     record_run,
     verify_chain,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "log_path",
     "query",
     "record_auth",
+    "record_phi_scan",
     "record_run",
     "verify_chain",
 ]

@@ -219,6 +219,39 @@ def record_auth(
     )
 
 
+def record_phi_scan(
+    *,
+    roots: Iterable[str],
+    scanned: dict[str, Any],
+    confirmed: int,
+    suspicious: int,
+    hits: Iterable[dict[str, Any]] | None = None,
+    selftest_failures: int = 0,
+    actor: str = "phi-guard",
+) -> dict[str, Any] | None:
+    """PHI 扫描留痕。
+
+    为什么要留：「我们扫过了、当时是干净的」本身是要能举证的结论。
+    只记**命中的位置（路径 + 字段）**，不记命中内容 —— 审计日志不是第二个 PHI 副本，
+    把患者信息抄进日志等于自己制造泄漏面。这一点和 `record_run` 里
+    `_maybe_redact` 是同一条原则。
+    """
+    return append(
+        {
+            "event": "phi_scan",
+            "actor": actor,
+            "roots": [str(item) for item in roots],
+            "scanned": dict(scanned),
+            "confirmed": confirmed,
+            "suspicious": suspicious,
+            "clean": confirmed == 0 and selftest_failures == 0,
+            "selftest_failures": selftest_failures,
+            # 只留位置，不留内容
+            "hits": [{"path": str(h.get("path")), "where": h.get("where")} for h in (hits or [])],
+        }
+    )
+
+
 # ------------------------------------------------------------------ 读取与校验
 
 

@@ -48,6 +48,16 @@ def _question_chars(record: dict) -> int:
     return len(question or "") if isinstance(question, str) else 0
 
 
+def _verdict(record: dict) -> str:
+    """把三种事件各自的「结论」压成一列，方便一眼扫过去。"""
+    event = record.get("event")
+    if event == "phi_scan":
+        return "clean" if record.get("clean") else "PHI"
+    if event == "auth":
+        return "allowed" if record.get("allowed") else "denied"
+    return record.get("verdict") or ""
+
+
 def to_row(record: dict) -> dict:
     return {
         "ts": record.get("ts") or record.get("started_at") or "",
@@ -55,7 +65,7 @@ def to_row(record: dict) -> dict:
         "run_id": record.get("run_id") or "",
         "actor": record.get("actor") or "",
         "client_ip": record.get("client_ip") or "",
-        "verdict": record.get("verdict") or ("allowed" if record.get("allowed") else ""),
+        "verdict": _verdict(record),
         "backend": record.get("backend") or "",
         "model": record.get("model") or "",
         "elapsed_s": record.get("elapsed_s") if record.get("elapsed_s") is not None else "",
