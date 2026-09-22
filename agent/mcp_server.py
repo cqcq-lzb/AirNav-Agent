@@ -43,7 +43,12 @@ INSTRUCTIONS = """\
 - 涉及具体候选之前，先调 inspect_case 或 list_nodule_candidates 确认编号口径。
   本系统的「客户端编号」与服务器清单的「服务端编号」并不一致，
   每个候选的两个编号都会同时返回。
-- plan_route 失败时读 error：多半是器械太粗，可用 scan_device_fit 查最大可行外径。
+- plan_route 失败时读返回体的 failure 字段：`failure.reason` 是为什么失败，
+  `failure.next_step` 就是该怎么做。器械过粗时上限已在
+  `failure.max_device_diameter_mm` 里，不必自己再调 scan_device_fit 去搜；
+  编号越界时 `failure.valid_candidate_id_range` 给出可用范围，
+  **不要自己挑别的编号去规划**，应把越界事实交回医生确认。
+  （E14：模型曾把用户要的 99 号静默换成 3 号并交付完整路径 —— 本系统最危险的错配。）
 - 解释「为什么选这条路径」请用 explain_route_choice，它会给出代价的四项占比。
 - 解释系统设计意图请用 search_knowledge，并在回答里带上 [KB-xx#n] 引用号。
 

@@ -443,6 +443,21 @@ def grade_tool_selection(case, run) -> list[GradeResult]:
         )
     )
 
+    # 「至少命中一个」的组：把要求钉在**行为**上而不是**路径**上。
+    # 例：E14 只要求「查证过编号」（inspect_case 或 plan_route 都算），
+    # 不规定必须先撞哪一面墙 —— 否则每次新增一条同样正确的路径，
+    # 都要回来改用例，而漏改的代价是把对的判成错的。
+    for group in case.expect_tools_any:
+        hit = [name for name in group if name in names]
+        results.append(
+            GradeResult(
+                "tool_selection",
+                bool(hit),
+                f"期望调用 {' 或 '.join(group)} 之一；实际 {names}"
+                + (f"；命中 {hit}" if hit else "；一个都没调"),
+            )
+        )
+
     if case.forbid_tools:
         violated = [name for name in case.forbid_tools if name in names]
         results.append(

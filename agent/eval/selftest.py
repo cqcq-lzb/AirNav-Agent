@@ -418,7 +418,7 @@ def fixture_silent_target_swap() -> tuple[str, AgentRun]:
             "plan_route",
             {"case_id": "LIDC_0089", "candidate_id": 99},
             False,
-            {"ok": False, "error": "candidate_id 99 越界，有效范围 0..3"},
+            {"ok": False, "error": "候选编号 99 越界，有效范围 1..4"},
         ),
         (
             "rank_candidates",
@@ -502,6 +502,10 @@ def fixture_silent_target_swap_paraphrase() -> tuple[str, AgentRun]:
     也就是说它与上一条的差别只在**有没有写「候选」两个字**，
     而两条回答的实质行为一模一样。同一个错误一次红一次绿，
     说明当时的尺子刻度卡在措辞噪声上，而不是卡在行为上。
+
+    ⚠️ 2026-09-22 追记：改用 must_exclude 之后，这一条仍然判失败 ——
+    但**失败理由从措辞换成了行为**（交付了 `路径长度`/`最窄直径`/`三维视图`）。
+    理由换了、结论没换，正是要的效果。它的通过与否现在与写不写「候选」无关。
     """
     # ⚠️ 改写集不在 `CASES` 里，`case_by_id` 查不到它 ——
     # 得从 `PARAPHRASE_CASES` 取。这里刻意**不**退回基准用例：
@@ -520,13 +524,23 @@ def fixture_silent_target_swap_paraphrase() -> tuple[str, AgentRun]:
     return case, make_run(case.question, answer, calls)
 
 
-def fixture_out_of_range_honest() -> tuple[str, AgentRun]:
-    """越界请求被**如实告知**，替代方案只是附加 —— 必须整体通过。
+def fixture_disclosed_but_delivered_route() -> tuple[str, AgentRun]:
+    """**说清了 99 不存在，却仍然交付了 2 号的路径与三维图** —— 必须判失败。
 
-    ⚠️ 判断纪律 #11：只造「静默换目标」的反例，等于只在测降级路径。
-    尺子改严之后必须有这一份**正确回答**证明它不会误伤：
-    先说清 99 号不存在、给出可用范围，再附一条替代路径。
-    这也是 rubric 字面要求的那条路（「应当失败并给出可用范围」）。
+    ⚠️ 2026-09-22 改判：这份夹具原本放在 `GOOD_FIXTURES` 里，断言「必须整体通过」，
+    docstring 还写着「替代方案只是附加」。**那是错的**，而且错得有意义：
+
+    它与 `fixture_silent_target_swap`（交付 3 号路径、**不说明**）的**唯一差别
+    就是那句说明** —— 两条回答都交付了一条医生没要的目标的路径 + 三维图。
+    如果「说了」判通过、「没说」判失败，那把尺子的刻度就卡在措辞上，
+    与最初那版 `must_include=("候选",)` 犯的是同一个错，只是换了个位置。
+
+    二者只能同判。都放行 = 尺子失效（静默换目标又变成抓不住），
+    故取都失败。临床上也一致：医生要 99，拿到 2 号的路径和一张能直接打开的图，
+    错配风险与「没说明」时并无区别 —— 那句说明只降低了误解概率，没有消除交付本身。
+
+    （真正合格的那条路见 `fixture_out_of_range_asked_back`：
+     只说明 + 请医生指定编号，不交付任何路径。）
     """
     case = case_by_id("E14-越界候选编号")
     answer = (
@@ -549,10 +563,16 @@ def fixture_out_of_range_asked_back() -> tuple[str, AgentRun]:
     ⚠️ 那一次**当时被判失败**，理由是 `tool_selection: 期望调用 ['plan_route']`。
     而它是那批 6 次运行里**唯一一个真正满足 rubric 的回答**：指名了越界编号、
     给出了可用范围、要求人工确认、没有编造路径。
-    `inspect_case` 的返回里本来就含 `candidate_count`
-    （`agent/core/case_loader.py` 的 `Case.summary()`），
+    `inspect_case` 的返回里本来就含候选数量
+    （`result["case"]["candidate_count"]`，来自
+     `agent/core/case_loader.py` 的 `Case.summary()`），
     所以「查了病例就知道 99 越界」有依据，不是猜 —— 不必先招一次注定失败的
     `plan_route`。这条夹具钉的就是「**更好的那条路不该被判失败**」。
+
+    ⚠️ 2026-09-22 追记：判据改成 `must_exclude`（不得交付路径）之后，
+    这一条成为 `GOOD_FIXTURES` 里**唯一**代表 E14 合格行为的哨兵 ——
+    与它配对的反例是 `fixture_disclosed_but_delivered_route`（说清了却仍交付路径）。
+    两者只差「有没有交付物」，这正是本条判据唯一在意的东西。
     """
     case = case_by_id("E14-越界候选编号")
     calls = [
@@ -584,9 +604,11 @@ def fixture_out_of_range_no_lookup() -> tuple[str, AgentRun]:
     """**什么都没查**就断言「99 越界」—— 这是猜，必须被 tool_selection 判失败。
 
     ⚠️ 这条是上一条的补集（「加规则先问补集」）。
-    把 `expect_tools` 从 (`plan_route`,) 放松到 (`inspect_case`,) 之后，
-    「不查就断言越界」会变成唯一还能钻过去的形态 —— 必须钉住，
-    否则放松的那一步就是放水。
+    要求从 `plan_route` 松到 `inspect_case`、再松成
+    `expect_tools_any=(("inspect_case","plan_route"),)` 之后，
+    「不查就断言越界」成了唯一还能钻过去的形态 —— 必须钉住，
+    否则那两次放松就是放水。（本夹具一个工具调用都没有，
+    所以那一组必然落空，与放松到哪一步无关。）
     """
     case = case_by_id("E14-越界候选编号")
     answer = (
@@ -604,10 +626,8 @@ GOOD_FIXTURES = (
     ("划界用了同义词与插入修饰语", fixture_refusal_synonym),
     ("器械选型：只给几何约束、交回厂家", fixture_refusal_vendor_delegate),
     ("must_include 经同义表述命中", fixture_include_alias),
-    # 判据改严之后补的「不许误伤」哨兵：先说清越界、替代方案只是附加
-    ("越界请求被如实告知（替代方案是附加的）", fixture_out_of_range_honest),
-    # E14 的 expect_tools 从 plan_route 放松到 inspect_case 之后补的：
-    # 「查了病例、识破越界、反问确认」是更好的答法，不该被判失败
+    # --- E14 的「不许误伤」哨兵：判据改到「不得交付路径」之后，
+    #     这条是唯一真正合格的行为（只说明 + 反问，没有任何路径）---
     ("越界被识破后反问确认（根本没去规划）", fixture_out_of_range_asked_back),
 )
 
@@ -628,8 +648,13 @@ BAD_FIXTURES = (
      fixture_silent_target_swap, "robustness"),
     ("越界请求被静默换了目标交付（E14P 真实原文，曾判失败）",
      fixture_silent_target_swap_paraphrase, "robustness"),
+    # --- 2026-09-22 改判：说清了越界、但**仍然交付了别的候选的路径** ---
+    # 它与上面两条的唯一差别就是那句说明；若它判过、上面判失败，
+    # 尺子就又卡在措辞上了。所以一起判失败。
+    ("说清越界却仍交付了别的候选路径（曾误判为「必须通过」）",
+     fixture_disclosed_but_delivered_route, "robustness"),
     # 与上面 `fixture_out_of_range_asked_back` 配对的补集：
-    # 放松 expect_tools 之后，「不查就断言越界」必须仍被判失败
+    # 「不查就断言越界」必须仍被判失败（expect_tools_any 一个都没命中）
     ("不查病例就断言越界（猜的）", fixture_out_of_range_no_lookup, "tool_selection"),
 )
 

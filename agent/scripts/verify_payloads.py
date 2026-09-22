@@ -29,7 +29,7 @@
 `plan_route` 现在规划成功就顺带把视图渲染好，返回体里给的是磁盘上真实的
 `viewer_path`。第 3 层把这条契约钉住（返回的路径必须 `is_file()`）。
 
-## 五层
+## 六层
 
     第 0 层 静态：源码里不许再出现 "artifact_id" / "artifact_note" 这类键
     第 1 层 实跑：会留痕的三个工具，返回体里不许有 xxx-NNN 裸 id
@@ -37,6 +37,8 @@
     第 3 层 正例：产出文件的工具（render_viewer / plan_route）必须给真文件
     第 4 层 落盘：自检的渲染不碰入库目录；同参数重复渲染不重写文件；
                   不同器械外径的渲染不互相覆盖
+    第 5 层 契约：规划失败必须结构化归因，且「最大可通过外径」要能真的执行
+                  （按它重试必须成功）—— 2026-09-22 加，见 `layer_5_failure_contract`
 
 第 4 层与「模型看到什么」无关，但它守的是同一件事的两面：**别让机器产生的
 噪声混进成果里**。自检渲染用的是 1.5 mm，而入库的演示产物是 2.0 mm —— 不隔离
@@ -244,6 +246,128 @@ def layer_4_render_hygiene() -> int:
     return failures
 
 
+def layer_5_failure_contract() -> int:
+    """失败返回体必须是**可执行的指令**，不能只是一句人话。
+
+    2026-09-22 加的。起因是 E14：`plan_route` 失败时返回体只有
+    `{"ok": false, "error": "..."}` 两个 key，而工具描述里那句
+    「失败就改用更细的器械重试」是**无条件**的 —— 对「编号越界」这种失败，
+    「换个参数重试」正好等于**静默换目标**：E14 的 trace 里模型 step 2 已经
+    写对了「99 超出了有效范围…范围是 1 到 4」，最终回答却交付了 3 号的
+    完整路径与三维图，通篇不提 99。**知道，但没说。**
+
+    这一层守两件事：
+      ① 失败原因**分得开**（编号越界 / 器械太粗 / 气道不通），各给一条下一步；
+      ② 给的数字**必须真的能用** —— 「最粗只能过 5.45mm」这句话要被执行一遍
+         （按该外径重试必须成功）。否则它只是一句好听的文案，
+         与「artifact_id 已生成」是同一类假话。
+    """
+    print("\n[5] 契约：规划失败必须结构化归因，而且给出的上限要能被真的执行")
+    failures = 0
+    session = NavSession()
+    registry = build_registry()
+
+    def run(name: str, **kwargs):
+        return registry.execute(name, dict(kwargs), context=session)
+
+    # ---- ① 编号越界 ----------------------------------------------------
+    out = run("plan_route", case_id="LIDC_0089", candidate_id=99,
+              device_diameter_mm=2.0)
+    failure = out.get("failure") or {}
+    failures += not check(
+        out.get("ok") is False and failure.get("reason") == "candidate_out_of_range",
+        "越界规划失败被归因为 candidate_out_of_range",
+        f"reason={failure.get('reason')!r}",
+    )
+    failures += not check(
+        failure.get("valid_candidate_id_range") == [1, 4]
+        and failure.get("available_candidate_ids") == [1, 2, 3, 4],
+        "越界失败体给出可用编号范围（而不是只写进 error 文案）",
+        f"range={failure.get('valid_candidate_id_range')!r}",
+    )
+    failures += not check(
+        "不要" in str(failure.get("next_step") or ""),
+        "越界失败的 next_step 明确禁止「自己换一个编号」",
+        str(failure.get("next_step"))[:40],
+    )
+    failures += not check(
+        "max_device_diameter_mm" not in failure,
+        "越界失败体不掺器械上限（别把两种原因混在一起）",
+    )
+
+    # ---- ② 器械太粗：上限要能被执行 -------------------------------------
+    thick = run("plan_route", case_id="LIDC_0089", candidate_id=3,
+                device_diameter_mm=6.0)
+    tfail = thick.get("failure") or {}
+    bound = tfail.get("max_device_diameter_mm")
+    failures += not check(
+        thick.get("ok") is False and tfail.get("reason") == "device_too_thick",
+        "器械过粗被归因为 device_too_thick",
+        f"reason={tfail.get('reason')!r}",
+    )
+    failures += not check(
+        isinstance(bound, (int, float)) and bound < 6.0,
+        "器械过粗的失败体给出最大可通过外径（原来完全没有这个数）",
+        f"max_device_diameter_mm={bound!r}",
+    )
+
+    # 关键：拿它当真，按这个上限重试一次 —— 必须成功。
+    # 这条把「上限」从一个说法变成**可执行的指令**。
+    if isinstance(bound, (int, float)):
+        retry = run("plan_route", case_id="LIDC_0089", candidate_id=3,
+                    device_diameter_mm=bound)
+        failures += not check(
+            retry.get("ok") is True,
+            f"按失败体给出的上限 {bound}mm 重试同一个候选必须成功",
+            f"ok={retry.get('ok')!r} err={retry.get('error')!r}",
+        )
+        # 而且是**同一个候选** —— 不许为了通过而偷偷换目标
+        failures += not check(
+            retry.get("candidate_id") == 3,
+            "重试仍落在同一个候选上（上限不等于换目标）",
+            f"candidate_id={retry.get('candidate_id')!r}",
+        )
+
+    # 与 scan_device_fit 的答案一致（分辨率以内）——
+    # 同一件事给两个数字，医生会以为其中一个错了。
+    scan = run("scan_device_fit", case_id="LIDC_0089", candidate_id=3)
+    scan_max = scan.get("max_device_diameter_mm")
+    if isinstance(bound, (int, float)) and isinstance(scan_max, (int, float)):
+        failures += not check(
+            abs(float(scan_max) - float(bound)) <= 0.1 + 1e-9,
+            "失败体的上限与 scan_device_fit 的答案一致（≤1 个分辨率步长）",
+            f"failure={bound} scan={scan_max}",
+        )
+
+    # ---- ③ 气道不通（真实数据凑不出，用派生用例补）--------------------
+    # `LIDC_0089` 的四个候选在 0.1mm 器械下都还有路，所以走不到这一支。
+    # 按「真实数据凑不出的边界值用派生夹具补」的纪律，直接调纯函数：
+    # `device_diameter_mm<=0` 这一支**不碰 ctx**，可以离线构造。
+    from ..tools.imaging import _plan_failure  # noqa: PLC0415
+
+    airway = _plan_failure(
+        None, "LIDC_0089", 3, RuntimeError("候选 3 在当前器械约束下没有可行路径"),
+        0.0, 0.2, 4, [1, 2, 3, 4],
+    )
+    afail = airway.get("failure") or {}
+    failures += not check(
+        afail.get("reason") == "route_infeasible_by_airway"
+        and afail.get("max_device_diameter_mm") is None,
+        "未施加器械约束仍失败 → 归因为 airway（换器械无用），不给上限",
+        f"reason={afail.get('reason')!r}",
+    )
+
+    # ---- ④ 反向：成功路径不许带 failure -------------------------------
+    good = run("plan_route", case_id="LIDC_0089", candidate_id=3,
+               device_diameter_mm=2.0)
+    failures += not check(
+        good.get("ok") is True and "failure" not in good,
+        "规划成功时不带 failure 字段（失败字段不污染正例）",
+    )
+
+    return failures
+
+
 def main() -> int:
     # 第 1/3/4 层要**真的调** render_viewer（器械 1.5 mm），而演示产物是 2.0 mm 那份。
     # 不隔离的话，跑一次自检就把 outputs/viewers 里的入库产物换成 1.5 mm 版本，
@@ -263,6 +387,7 @@ def main() -> int:
     failures += layer_2_notes()
     failures += layer_3_viewer_gives_file()
     failures += layer_4_render_hygiene()
+    failures += layer_5_failure_contract()
 
     total = len(RESULTS)
     passed = sum(1 for ok, _, _ in RESULTS if ok)
@@ -274,7 +399,8 @@ def main() -> int:
                 print(f"  FAIL  {label}（{detail}）")
         return 1
     print(f"自检通过：{passed}/{total} 项全部符合预期")
-    print("覆盖：源码扫描 · 实跑返回体 · 不产出文件的说明 · 出图与规划都给真文件 · 落盘卫生")
+    print("覆盖：源码扫描 · 实跑返回体 · 不产出文件的说明 · 出图与规划都给真文件 · 落盘卫生"
+          " · 失败的归因与上限可执行")
     return 0
 
 

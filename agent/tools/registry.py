@@ -257,13 +257,31 @@ class ToolRegistry:
                 result = spec.handler(**payload)
             if not isinstance(result, dict):
                 result = {"ok": True, "value": result}
+            # ⚠️ 2026-09-22：`ok` 必须**读返回体自己写的值**，原来这里写死 `ok=True`。
+            # 后果是「工具返回 ok=false」被记成一次**成功调用**，而且与
+            # `agent_loop.py` 记 step 时的 `result.get("ok", False)` **自相矛盾** ——
+            # 同一次调用，step 记录说失败、trace 记录说成功。
+            # 吃亏的都是消费 trace 的人：
+            #   · `graders.grade_tool_arguments` 只挑成功调用比对参数，
+            #     于是失败调用的参数会被当成「已正确传参」；
+            #   · `graders.grade_robustness` 的「相同参数反复重试」检测直接失明；
+            #   · `demo_scripted` 那条「预期内失败」断言目前是靠**异常路径**
+            #     （下面 `except` 里显式 `ok=False`）兜着的，所以一直没暴露。
+            # 顺带把失败原因写进 record —— 否则 `to_dict()["error"]` 是 None，
+            # 报告里只看得见 ok=false，读不到为什么。
             result.setdefault("ok", True)
+            ok_flag = bool(result.get("ok"))
             record = ToolCallRecord(
                 step=step,
                 name=name,
                 arguments=payload,
-                ok=True,
+                ok=ok_flag,
                 result=result,
+                error=(
+                    None
+                    if ok_flag
+                    else str(result.get("error") or "工具返回 ok=false")
+                ),
                 elapsed_ms=int((time.time() - started) * 1000),
             )
             self.calls.append(record)

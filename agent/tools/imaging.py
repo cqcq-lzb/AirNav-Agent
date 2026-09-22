@@ -23,6 +23,14 @@ from .session import NavSession
 # 低于这个直径的路径在实际支气管镜操作中基本不可用
 CLINICAL_NARROW_WARNING_MM = 2.0
 
+# 器械外径二分的取值口径。抽成常量，是因为 `scan_device_fit` 与
+# `plan_route` 的失败增强**都要做这件事** —— 两处各写一套二分迟早会走偏
+# （改了一处忘了另一处），而且会给医生两个不一样的上限值。
+DEVICE_SEARCH_LOW_MM = 0.1
+DEVICE_SEARCH_HIGH_MM = 6.0
+DEVICE_SEARCH_RESOLUTION_MM = 0.1
+DEVICE_SEARCH_MAX_STEPS = 12
+
 ProfileName = Literal["balanced", "wide_airway", "gentle_turn"]
 
 
@@ -233,6 +241,207 @@ def _baseline_block(plan: RoutePlan) -> tuple[dict[str, Any] | None, str | None]
     return baseline, note
 
 
+# ------------------------------------------------------------------ 规划失败的结构化归因
+
+
+def _error_text(error: BaseException) -> str:
+    """异常的展示文案。与 registry 兜异常时的写法保持一致，报告里不会有两种格式。"""
+    return f"{type(error).__name__}: {error}"
+
+
+def _search_max_device_diameter(
+    ctx: NavSession,
+    case_id: str,
+    candidate_id: int,
+    device_margin_mm: float,
+    upper_mm: float = DEVICE_SEARCH_HIGH_MM,
+) -> dict[str, Any]:
+    """二分查找该候选**能通过的最大器械外径**。
+
+    可行性对直径单调（越粗越难过），所以二分有效。
+
+    返回：
+      max_device_diameter_mm  最大可通过外径；None 表示「连最细的也不行」
+      bounded_by_scan_limit   True 表示在上界处就能过，真值只知 ≥ upper_mm（未收敛）
+      search_steps / resolution_mm
+      minimum_diameter_on_route_mm / profile_used
+
+    单独抽出来，是因为 `scan_device_fit` 与 `plan_route` 的失败增强都要用它。
+    注意 `min_route_diameter` 是路径最窄处的**直径**，与「最大可通过外径」
+    是两个量 —— 调用方报给医生时不要混。
+    """
+    if ctx.is_reachable(case_id, candidate_id, upper_mm, device_margin_mm):
+        probe = ctx.plan(case_id, candidate_id, None, upper_mm, device_margin_mm)
+        return {
+            "max_device_diameter_mm": upper_mm,
+            "bounded_by_scan_limit": True,
+            "search_steps": 0,
+            "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
+            "minimum_diameter_on_route_mm": round(
+                probe.metrics["minimum_diameter_mm"], 3
+            ),
+            "profile_used": probe.profile_name,
+        }
+
+    low = DEVICE_SEARCH_LOW_MM
+    if not ctx.is_reachable(case_id, candidate_id, low, device_margin_mm):
+        return {
+            "max_device_diameter_mm": None,
+            "bounded_by_scan_limit": False,
+            "search_steps": 0,
+            "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
+            "minimum_diameter_on_route_mm": None,
+            "profile_used": None,
+        }
+
+    high = upper_mm
+    steps = 0
+    while (
+        high - low > DEVICE_SEARCH_RESOLUTION_MM
+        and steps < DEVICE_SEARCH_MAX_STEPS
+    ):
+        mid = round((low + high) / 2.0, 3)
+        if ctx.is_reachable(case_id, candidate_id, mid, device_margin_mm):
+            low = mid
+        else:
+            high = mid
+        steps += 1
+
+    best = ctx.plan(case_id, candidate_id, None, low, device_margin_mm)
+    return {
+        "max_device_diameter_mm": low,
+        "bounded_by_scan_limit": False,
+        "search_steps": steps,
+        "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
+        "minimum_diameter_on_route_mm": round(best.metrics["minimum_diameter_mm"], 3),
+        "profile_used": best.profile_name,
+    }
+
+
+def _plan_failure(
+    ctx: NavSession,
+    case_id: str,
+    candidate_id: int,
+    error: BaseException,
+    device_diameter_mm: float,
+    device_margin_mm: float,
+    candidate_count: int,
+    candidate_ids: list[int],
+) -> dict[str, Any]:
+    """把 `plan_route` 的失败整理成**模型能直接照做**的结构化返回体。
+
+    动机（2026-09-22 实测，见 `docs/评测区分度_同义改写实验.md` 第八节）：
+
+    原来的失败体只有两个 key —— `{"ok": false, "error": "RuntimeError: 候选 2 …"}`。
+    模型只拿到一句话，而工具描述里那句「失败就改用更细的器械重试」是**无条件**的。
+    对「编号越界」这种失败，「换个参数重试」正好等于**静默换目标**：
+    E14 的 trace 里，模型 step 2 的推理已经写对了
+    「客户端编号 99 超出了有效范围…范围是 1 到 4」，最终回答却交付了
+    3 号的完整路径 + 三维图，通篇不提 99 —— **知道，但没说**。
+
+    所以修法不是再补一句提示词（试过，零收益且把 E01P/E02P 压坏，已回滚），
+    而是让**返回体自己按原因分支**：`next_step` 随 `reason` 变，模型照抄即可。
+
+    两种异常是可以区分的（`agent/core/case_loader.py` 与 `planner.py` 的约定）：
+      越界            -> KeyError     （`candidate_mask` / `candidate`）
+      无可行路径      -> RuntimeError （器械太粗，或气道本身不通）
+    """
+    if isinstance(error, KeyError):
+        return {
+            "ok": False,
+            "error": _error_text(error),
+            "failure": {
+                "reason": "candidate_out_of_range",
+                "candidate_id": candidate_id,
+                "valid_candidate_id_range": [1, candidate_count],
+                "available_candidate_ids": candidate_ids,
+                "next_step": (
+                    f"**不要**自己挑一个别的编号去规划。先把「{candidate_id} 号不存在、"
+                    f"本病例可用编号是 1..{candidate_count}」告知医生，"
+                    f"请医生指定要规划哪一个。"
+                ),
+                "hint": (
+                    f"本病例只有 {candidate_count} 个结节候选"
+                    f"（编号 1..{candidate_count}），没有 {candidate_id} 号。"
+                ),
+            },
+        }
+
+    # ---- RuntimeError：没有可行路径。先分清「器械太粗」还是「气道本身不通」，
+    #      这两种的诊断结论完全不同，不能让模型自己去猜。
+    if device_diameter_mm <= 0:
+        # 连器械约束都没施加仍然规划不出来 → 换器械无用
+        return {
+            "ok": False,
+            "error": _error_text(error),
+            "failure": {
+                "reason": "route_infeasible_by_airway",
+                "candidate_id": candidate_id,
+                "requested_device_diameter_mm": device_diameter_mm,
+                "max_device_diameter_mm": None,
+                "next_step": (
+                    "该目标在当前气道分割下没有可行路径，**换更细的器械也不会变**。"
+                    "请复核靶点位置或气道分割质量，并如实告知医生此路不通。"
+                ),
+                "hint": "未施加器械尺寸约束仍然没有路径，问题不在器械。",
+            },
+        }
+
+    # 已知该外径过不去，所以上限一定 ≤ 请求值 —— 二分上界取请求值即可，
+    # 比默认的 6.0mm 少搜一段（每次探测都是一次完整规划，不便宜）。
+    upper = max(DEVICE_SEARCH_LOW_MM, min(DEVICE_SEARCH_HIGH_MM, device_diameter_mm))
+    search = _search_max_device_diameter(
+        ctx, case_id, candidate_id, device_margin_mm, upper_mm=upper
+    )
+    max_mm = search["max_device_diameter_mm"]
+
+    if max_mm is None:
+        return {
+            "ok": False,
+            "error": _error_text(error),
+            "failure": {
+                "reason": "route_infeasible_by_airway",
+                "candidate_id": candidate_id,
+                "requested_device_diameter_mm": device_diameter_mm,
+                "max_device_diameter_mm": None,
+                "next_step": (
+                    "即使最细的器械（0.1mm）也无法规划出路径，问题不在器械尺寸，"
+                    "而在气道本身。换器械无用，请复核靶点或气道分割。"
+                ),
+                "hint": "连 0.1mm 器械都无可行路径，属几何上不通。",
+            },
+        }
+
+    return {
+        "ok": False,
+        "error": _error_text(error),
+        "failure": {
+            "reason": "device_too_thick",
+            "candidate_id": candidate_id,
+            "requested_device_diameter_mm": device_diameter_mm,
+            "device_margin_mm": device_margin_mm,
+            "max_device_diameter_mm": round(max_mm, 2),
+            "minimum_diameter_on_route_mm": search["minimum_diameter_on_route_mm"],
+            "search_steps": search["search_steps"],
+            "search_resolution_mm": search["resolution_mm"],
+            # ⚠️ 这个上限是**二分收敛到的某个「已实测可行」的点**，不是无限精度的真值：
+            # 上界取得不同（比如请求 3.0mm vs 1.5mm），收敛点会差在分辨率以内
+            # （实测同一候选得到 1.19 / 1.24 / 1.21）。所以别把它当唯一数值去对账，
+            # 报告时也只说「约 X mm」。真值区间是 (X, X + resolution]。
+            "precision_mm": search["resolution_mm"],
+            "next_step": (
+                f"把 device_diameter_mm 降到 {round(max_mm, 2)}mm 或更细，"
+                f"再对**同一个候选 {candidate_id}** 调一次本工具"
+                f"（安全余量 {device_margin_mm}mm 不变）。"
+            ),
+            "hint": (
+                f"器械外径 {device_diameter_mm}mm 过不去；"
+                f"该候选的路径最粗只能过约 {round(max_mm, 2)}mm。"
+            ),
+        },
+    }
+
+
 # ------------------------------------------------------------------ 工具实现
 
 
@@ -304,7 +513,15 @@ def register_tools(registry: ToolRegistry) -> None:
         "把它原样写进回答即可，这次说「三维视图已生成」是真的；"
         "不要复述视图里的数字，也不必为同一目标再调 render_viewer。"
         "（viewer_error 非空说明这次没出成图，那就如实说没出图，别许诺链接。）"
-        "规划失败会返回 ok=false 与原因，此时应改用更细的器械或换代价配置重试。",
+        "规划失败会返回 ok=false，并在 `failure` 字段里给出 `reason` 与 `next_step`："
+        "**先读 failure.next_step，按它做**。"
+        "`reason=candidate_out_of_range` 表示编号不存在（可用范围在 "
+        "`failure.valid_candidate_id_range`）—— **此时不要自己挑别的编号去规划**，"
+        "要把越界事实与可用范围告诉医生；"
+        "`reason=device_too_thick` 表示器械过粗（上限已在 "
+        "`failure.max_device_diameter_mm`，用它以内的外径重试**同一个候选**）；"
+        "`reason=route_infeasible_by_airway` 表示几何上不通，换器械无用。"
+        "（换代价配置 profile 属于同一目标的重试，任何时候都允许。）",
         PlanArgs,
         # 与 rank_candidates 同批发出时，本调用会被循环自动延后一步 ——
         # 因为「规划哪个候选」必须先看到排序结果才能定，
@@ -320,9 +537,30 @@ def register_tools(registry: ToolRegistry) -> None:
         device_margin_mm: float = 0.2,
     ) -> dict[str, Any]:
         case = ctx.load(case_id)
-        plan = ctx.plan(
-            case_id, candidate_id, profile, device_diameter_mm, device_margin_mm
-        )
+        try:
+            plan = ctx.plan(
+                case_id, candidate_id, profile, device_diameter_mm, device_margin_mm
+            )
+        except (KeyError, RuntimeError) as error:
+            # 失败也要**结构化** —— 见 `_plan_failure` 里记的现场。
+            # 只接这两种异常：越界与「无可行路径」是可预期、可指导下一步的失败；
+            # 其它异常继续往上抛，由 registry 兜住。否则「程序坏了」会被
+            # 伪装成「路径不通」，模型会照着一条错的方向去改参数。
+            if isinstance(error, KeyError) and 1 <= candidate_id <= case.candidate_count:
+                # ⚠️ 编号合法却仍抛 KeyError —— 那不是越界，是别的地方出了错。
+                # 这种情况**必须重抛**：如果硬说成「编号越界」，模型会去改一个
+                # 本来正确的编号，等于我们亲手制造一次静默换目标。
+                raise
+            return _plan_failure(
+                ctx,
+                case_id,
+                candidate_id,
+                error,
+                device_diameter_mm,
+                device_margin_mm,
+                case.candidate_count,
+                [item.candidate_id for item in case.candidates],
+            )
         baseline, baseline_note = _baseline_block(plan)
 
         # 折线数据留痕（供 artifacts 列表与 trace 使用）。
@@ -430,20 +668,20 @@ def register_tools(registry: ToolRegistry) -> None:
         device_margin_mm: float = 0.2,
     ) -> dict[str, Any]:
         case = ctx.load(case_id)
-        resolution = 0.1
+        # 二分搜索本体抽在 `_search_max_device_diameter` —— `plan_route` 的失败增强
+        # 也要用它，两处必须是同一个答案，否则医生会拿到两个不同的上限值。
+        found = _search_max_device_diameter(
+            ctx, case_id, candidate_id, device_margin_mm, upper_mm=max_diameter_mm
+        )
+        max_mm = found["max_device_diameter_mm"]
 
-        if ctx.is_reachable(case_id, candidate_id, max_diameter_mm, device_margin_mm):
-            probe = ctx.plan(
-                case_id, candidate_id, None, max_diameter_mm, device_margin_mm
-            )
+        if found["bounded_by_scan_limit"]:
             return {
                 "case_id": case_id,
                 "candidate_id": candidate_id,
                 "max_device_diameter_mm": max_diameter_mm,
                 "bounded_by_scan_limit": True,
-                "minimum_diameter_on_route_mm": round(
-                    probe.metrics["minimum_diameter_mm"], 3
-                ),
+                "minimum_diameter_on_route_mm": found["minimum_diameter_on_route_mm"],
                 "note": (
                     f"在扫描上界 {max_diameter_mm}mm 处即可通过，"
                     f"所以**最大可通过外径 ≥ {max_diameter_mm}mm** —— 本次没触到上界，"
@@ -455,8 +693,7 @@ def register_tools(registry: ToolRegistry) -> None:
                 ),
             }
 
-        low, high = 0.1, max_diameter_mm
-        if not ctx.is_reachable(case_id, candidate_id, low, device_margin_mm):
+        if max_mm is None:
             return {
                 "case_id": case_id,
                 "candidate_id": candidate_id,
@@ -464,28 +701,16 @@ def register_tools(registry: ToolRegistry) -> None:
                 "note": "即使 0.1mm 器械也无法规划出路径，问题不在器械尺寸，而在气道本身",
             }
 
-        steps = 0
-        while high - low > resolution and steps < 12:
-            mid = round((low + high) / 2.0, 3)
-            if ctx.is_reachable(case_id, candidate_id, mid, device_margin_mm):
-                low = mid
-            else:
-                high = mid
-            steps += 1
-
-        best = ctx.plan(case_id, candidate_id, None, low, device_margin_mm)
         return {
             "case_id": case_id,
             "candidate_id": candidate_id,
-            "max_device_diameter_mm": round(low, 2),
-            "search_steps": steps,
-            "resolution_mm": resolution,
-            "minimum_diameter_on_route_mm": round(
-                best.metrics["minimum_diameter_mm"], 3
-            ),
-            "profile_used": best.profile_name,
+            "max_device_diameter_mm": round(max_mm, 2),
+            "search_steps": found["search_steps"],
+            "resolution_mm": found["resolution_mm"],
+            "minimum_diameter_on_route_mm": found["minimum_diameter_on_route_mm"],
+            "profile_used": found["profile_used"],
             "note": (
-                f"该结节最粗可通过约 {round(low, 2)}mm 外径器械"
+                f"该结节最粗可通过约 {round(max_mm, 2)}mm 外径器械"
                 f"（安全余量 {device_margin_mm}mm）"
             ),
         }
