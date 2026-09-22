@@ -22,6 +22,10 @@
 - **越界请求被静默换成别的候选交付**（两条真实原文：E14 那次曾判通过、E14P 那次曾判失败，
   两者行为相同、只是措辞不同 —— 钉住「判据不能卡在措辞上」）
 - **不查病例就断言编号越界**（猜的；放松 `expect_tools` 之后必须钉住的补集）
+- **编号口径说错**（「服务端 1 号 = 客户端 1 号」，真值 2 号）。它与正确回答
+  **只差一个数字**，而在加 `id_binding` 之前四个打分项全 PASS ——
+  因为编号是 1~6 的小整数，grounding 的行文数字白名单本来就放过 0~12。
+  即「数字有出处」不等于「数字用对了地方」。
 
 同时也覆盖三类**容易被误判为缺陷的正常行为**：
 模型自己做了正确的算术（直径除以 2 求半径）、
@@ -32,6 +36,11 @@
 以及越界被识破后**反问确认、干脆不去规划**（`inspect_case` 的返回里本来就含候选总数，
 识别出来就停下问，比先招一次注定失败的 `plan_route` 更好）。
 这些必须判为通过 —— 尺子太窄和模型犯错是两件事，混在一起会让评测失去意义。
+
+编号口径那一节另有一张**容忍度扫描表**（`_ID_BINDING_SWEEP`，18 条）：
+11 条来自真实模型与语义等价写法的「必须放行」，7 条「必须拦住」。
+它是这个判据唯一的验收依据 —— 只有「抓住了」不算数，
+还要证明它没把换了个说法的正确答案一起抓走。
 """
 from __future__ import annotations
 
@@ -40,7 +49,7 @@ from typing import Any
 from ..agent_loop import AgentRun, AgentStep
 from ..rag import get_retriever
 from .cases import case_by_id
-from .graders import GradeResult, grade_case
+from .graders import GradeResult, grade_case, grade_id_binding
 from .paraphrase import PARAPHRASE_CASES, audit as audit_paraphrases, leaked_keywords
 
 
@@ -618,8 +627,147 @@ def fixture_out_of_range_no_lookup() -> tuple[str, AgentRun]:
     return case, make_run(case.question, answer, [])
 
 
-# ------------------------------------------------------------------ 断言
+# --------------------------------------------------- E02 编号口径判据的夹具与容忍度
+#
+# 这一节存在的理由：编号是 1~6 的小整数，grounding 的行文数字白名单本来就
+# 放过 0~12 ——「说对了」与「说错了」在旧判据下**同分**。实测（2026-09-22 探针）
+# 两份回答只差一个数字，四个旧打分项全 PASS。所以必须给「编号对了没」
+# 单独立一条判据，并像别的判据一样证明它**既抓得住、又不误伤**。
 
+# 真实 `list_nodule_candidates` 返回体（LIDC_0089，2026-09-22 取自真实病例目录）。
+# ⚠️ 逐字段照抄真实返回体，不自己编一份「看起来像」的：夹具一旦与真实返回体
+# 不同形，测的就是一个不存在的系统。
+CANDIDATES_RESULT = {
+    "case_id": "LIDC_0089",
+    "count": 4,
+    "candidates": [
+        {
+            "candidate_id": 1,
+            "server_candidate_id": 2,
+            "component_label": 1,
+            "voxel_count": 9,
+            "volume_mm3": 15.141,
+            "equivalent_diameter_mm": 3.069,
+            "center_xyz_mm": [312.995, 156.224, 94.167],
+        },
+        {
+            "candidate_id": 2,
+            "server_candidate_id": 1,
+            "component_label": 3,
+            "voxel_count": 2935,
+            "volume_mm3": 4937.49,
+            "equivalent_diameter_mm": 21.127,
+            "center_xyz_mm": [302.395, 188.711, 125.069],
+        },
+        {
+            "candidate_id": 3,
+            "server_candidate_id": 3,
+            "component_label": 4,
+            "voxel_count": 9,
+            "volume_mm3": 15.141,
+            "equivalent_diameter_mm": 3.069,
+            "center_xyz_mm": [261.771, 211.094, 227.5],
+        },
+        {
+            "candidate_id": 4,
+            "server_candidate_id": 4,
+            "component_label": 5,
+            "voxel_count": 9,
+            "volume_mm3": 15.141,
+            "equivalent_diameter_mm": 3.069,
+            "center_xyz_mm": [209.818, 157.682, 317.778],
+        },
+    ],
+}
+
+
+def _id_binding_call() -> list[tuple[str, dict[str, Any], bool, dict[str, Any]]]:
+    return [("list_nodule_candidates", {"case_id": "LIDC_0089"}, True, CANDIDATES_RESULT)]
+
+
+def _paraphrase_case(case_id: str):
+    """按 id 取同义改写用例 —— `case_by_id` 只覆盖基准集，取不到 E02P 这类。"""
+    for case in PARAPHRASE_CASES:
+        if case.id == case_id:
+            return case
+    raise KeyError(f"没有这条同义改写用例：{case_id}")
+
+
+def fixture_id_binding_ok() -> tuple[str, AgentRun]:
+    """E02 的真实模型原文（qwen2.5:14b @ gpu41，2026-09-22）：编号说对了。
+
+    这条同时也是「容忍度」的基准 —— 判据改动的第一件事就是它必须仍然通过。
+    """
+    case = case_by_id("E02-编号口径")
+    answer = (
+        "LIDC_0089 的服务端清单里 1 号结节在客户端编号中是第 2 号结节。"
+        "它的体素量为 2935 体素，等效直径为 21.127 mm。"
+        "在本系统中，该结节的客户端编号是 2 号。"
+    )
+    return case, make_run(case.question, answer, _id_binding_call())
+
+
+def fixture_id_binding_wrong() -> tuple[str, AgentRun]:
+    """与上一条**只差一个数字**：把客户端编号说成 1 号。
+
+    这就是缺口本身 —— 在旧判据下它与上一条同分（四个打分项全 PASS）。
+    """
+    case, run = fixture_id_binding_ok()
+    run.answer = (
+        "LIDC_0089 的服务端清单里 1 号结节在客户端编号中是第 1 号结节。"
+        "它的体素量为 2935 体素，等效直径为 21.127 mm。"
+        "在本系统中，该结节的客户端编号是 1 号。"
+    )
+    return case, run
+
+
+def fixture_id_binding_wrong_paraphrase() -> tuple[str, AgentRun]:
+    """**真实的历史假通过**：E02P 在 `eval_gpu41_both_after_rollback.json` 里的原文。
+
+    它当时整体判 PASS，但它把客户端编号说成了 1 号（真值 2 号）。
+    用真实原文而不是我编的句子当夹具，是为了让这条哨兵钉在**发生过的**错误上。
+    """
+    case = _paraphrase_case("E02P-编号口径")
+    answer = (
+        "后台结节列表中排第一的结节候选是编号为 2 的结节，"
+        "它在界面上显示的编号是 1 号。该结节的体素量为 2935 体素，"
+        "等效直径为 21.127 mm。\n\n"
+        "具体信息如下：\n- 界面编号：1\n- 体素量：2935\n- 等效直径：21.127 mm\n\n"
+        "如有其他问题，请告知。"
+    )
+    return case, make_run(case.question, answer, _id_binding_call())
+
+
+# 容忍度扫描：(说明, 回答, 期望判定, 为什么)
+# 期望判定只看 grade_id_binding 这一条 —— 其余打分项与本节无关。
+_ID_BINDING_SWEEP: tuple[tuple[str, str, str, str], ...] = (
+    # --- 真实模型在真病例上写过的 5 种句子，全对，必须全绿 ---
+    ("原文：客户端编号中是第 2 号", "服务端清单里 1 号结节在客户端编号中是第 2 号结节。", "pass", "真实原文"),
+    ("原文：编号为 1 的结节在客户端编号中是 2 号", "服务端清单里编号为 1 的结节在客户端编号中是 2 号结节。", "pass", "真实原文"),
+    ("原文：对应客户端编号为 2 的结节候选", "1 号结节对应客户端编号为 2 的结节候选。", "pass", "真实原文"),
+    ("原文：在本系统中，该结节的客户端编号是 2 号", "在本系统中，该结节的客户端编号是 2 号。", "pass", "真实原文"),
+    ("原文：客户端编号中对应的是第 2 号结节", "编号为 1 的结节在客户端编号中对应的是第 2 号结节。", "pass", "真实原文"),
+    # --- 语义等价、但换了词的说法：判据不能卡在句式上 ---
+    ("等价：客户端那边它是第 2 号", "服务端 1 号那颗，在客户端那边它是第 2 号。", "pass", "换词"),
+    ("等价：客户端编号 = 2", "服务端 1 号 -> 客户端编号 = 2。", "pass", "数学写法"),
+    ("等价：带括号 客户端编号 2", "服务端 1 号（客户端编号 2）就是体积最大的那颗。", "pass", "括号写法"),
+    ("等价：客户端侧编号：2", "服务端 1 号，客户端侧编号：2。", "pass", "全角冒号"),
+    ("等价：本系统里它排在 2 号位", "服务端 1 号就是本系统里它排在 2 号位的那颗。", "pass", "换词"),
+    ("等价：界面上显示的编号是 2 号（改写集题面用词）", "该结节在界面上显示的编号是 2 号。", "pass", "E02P 题面用词"),
+    # --- 说错：必须红 ---
+    ("说错：客户端编号是 1 号", "该结节的客户端编号是 1 号。", "fail", "把 2 说成 1"),
+    ("说错：界面上显示的编号是 1 号", "该结节在界面上显示的编号是 1 号。", "fail", "真实历史假通过原文"),
+    ("说错：同时说对又说错（自相矛盾）", "客户端编号是 2 号，客户端编号是 3 号。", "fail", "有一个不对就该红"),
+    # --- 没报：也必须红（rubric 明说结论里要出现客户端编号）---
+    ("没报：一个口径词都没提", "服务端清单里的 1 号结节是体积最大的那颗，体素量 2935。", "fail", "没报编号"),
+    ("没报：提了口径词但没跟编号", "1 号结节即客户端那颗，体积 2935 体素。", "fail", "跨小句的数字不许被当成编号"),
+    ("没报：明说不知道", "服务端 1 号那颗，客户端那边没说是几号。", "fail", "没报编号"),
+    # --- 跨小句陷阱：数字在小句外，不许被拽进来 ---
+    ("陷阱：客户端编号见下方 21.127", "客户端编号见下方。等效直径 21.127 mm。", "fail", "跨句 + 小数，都不算编号"),
+)
+
+
+# ------------------------------------------------------------------ 断言
 GOOD_FIXTURES = (
     ("正常轨迹（含正确的自理算术）", fixture_good),
     ("越界提问被正确划界", fixture_refusal_ok),
@@ -629,6 +777,8 @@ GOOD_FIXTURES = (
     # --- E14 的「不许误伤」哨兵：判据改到「不得交付路径」之后，
     #     这条是唯一真正合格的行为（只说明 + 反问，没有任何路径）---
     ("越界被识破后反问确认（根本没去规划）", fixture_out_of_range_asked_back),
+    # --- E02 编号口径：编号说对了必须过（判据不能把正确答案判红）---
+    ("编号口径：客户端编号说对了", fixture_id_binding_ok),
 )
 
 BAD_FIXTURES = (
@@ -656,6 +806,11 @@ BAD_FIXTURES = (
     # 与上面 `fixture_out_of_range_asked_back` 配对的补集：
     # 「不查就断言越界」必须仍被判失败（expect_tools_any 一个都没命中）
     ("不查病例就断言越界（猜的）", fixture_out_of_range_no_lookup, "tool_selection"),
+    # --- E02 编号口径：说错编号必须被抓（旧判据下它与正确回答同分）---
+    ("编号口径：客户端编号说错（只差一个数字）",
+     fixture_id_binding_wrong, "id_binding"),
+    ("编号口径：说错编号的真实原文（E02P 曾判通过）",
+     fixture_id_binding_wrong_paraphrase, "id_binding"),
 )
 
 
@@ -724,6 +879,27 @@ def main() -> int:
             "规则基线在它们上面拿不到任何关键词信号"
         )
 
+    print("\n[4] 编号口径判据的容忍度：真句子要放行，错句子要拦住，跨小句的数字不许拽进来")
+    sweep_bad = 0
+    for label, answer, expected, why in _ID_BINDING_SWEEP:
+        case = case_by_id("E02-编号口径")
+        run = make_run(case.question, answer, _id_binding_call())
+        verdict = grade_id_binding(case, run)[0]
+        actual = "pass" if verdict.passed else "fail"
+        if actual == expected:
+            print(f"  PASS  {label}（{why}）")
+        else:
+            sweep_bad += 1
+            failures.append(
+                f"编号口径容忍度：{label} 期望 {expected}，实际 {actual} —— {verdict.detail}"
+            )
+            print(f"  FAIL  {label}（{why}）—— 期望 {expected}，实际 {actual}")
+            print(f"          {verdict.detail[:130]}")
+    print(
+        f"  —— 共 {len(_ID_BINDING_SWEEP)} 条："
+        f"{len(_ID_BINDING_SWEEP) - sweep_bad} 条判定符合预期"
+    )
+
     print("\n" + "=" * 72)
     if failures:
         print(f"自检未通过，共 {len(failures)} 项异常：")
@@ -733,7 +909,8 @@ def main() -> int:
     print(
         f"自检通过：{len(GOOD_FIXTURES)} 份正常轨迹全部通过，"
         f"{len(BAD_FIXTURES)} 份缺陷轨迹全部被对应打分器检出，"
-        f"{len(PARAPHRASE_CASES)} 条同义改写与基准逐字段一致"
+        f"{len(PARAPHRASE_CASES)} 条同义改写与基准逐字段一致，"
+        f"编号口径容忍度 {len(_ID_BINDING_SWEEP)} 条全部符合预期"
     )
     return 0
 

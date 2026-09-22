@@ -172,6 +172,10 @@ _EXPECT_FIELDS: tuple[str, ...] = (
     "expect_refusal",
     "must_include",
     "must_exclude",
+    # 编号口径这两项也要跟着走：漏进来就等于「改写用例放宽了编号判据」，
+    # 而那正是实验最容易被悄悄污染的地方。
+    "expect_server_id",
+    "client_id_anchors",
     "check_grounding",
     "expect_knowledge_topics",
 )

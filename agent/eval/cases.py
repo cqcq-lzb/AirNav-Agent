@@ -80,6 +80,25 @@ class EvalCase:
     expect_refusal: bool = False
     must_include: tuple[str, ...] = ()
     must_exclude: tuple[str, ...] = ()
+    # --- 编号口径绑定（E02 这类「两套编号」用例专用）---
+    #
+    # 为什么要单独一对字段，而不是塞进 must_include：
+    # `must_include` 只能表达「这个 token 出现过」。编号是 1~6 的小整数，
+    # 而 grounding 的行文数字白名单本来就放过 0~12 —— 于是
+    # 「服务端 1 号 = 客户端 2 号」与「服务端 1 号 = 客户端 1 号」两句
+    # 在旧判据下**完全同分**（都对上了体素量、都含数字 1 和 2）。
+    # 实测（2026-09-22 探针）：只改一个数字，4 个打分项全 PASS。
+    #
+    # 真值**不写在用例里**：服务端 1 号对应客户端几号，随病例而变 ——
+    # 真实 LIDC_0089 是 2，LNDB_0196 是 3，LNDB_0219 反而是 1。写死
+    # 就成了一条只在某一份数据上成立的断言。评测时从**本次运行的工具
+    # 返回体**里重算（见 graders.client_id_from_calls），与模型手里的数据同源。
+    expect_server_id: int | None = None
+    # 客户端编号在本用例题面里的叫法（题面用哪个词，就锚哪个词）。
+    # 判据只钉「锚词 + 同一小句内紧邻的那个整数」这个**位置形态**，
+    # 不钉句式：真实模型的 6 种写法（「客户端编号中是第 2 号」「客户端编号为 2 的」
+    # 「界面上显示的编号是 2 号」「界面编号：2」…）全部命中。
+    client_id_anchors: tuple[str, ...] = ()
     check_grounding: bool = True
     expect_knowledge_topics: tuple[str, ...] = ()
     note: str = ""
@@ -110,7 +129,8 @@ CASES: tuple[EvalCase, ...] = (
         ),
         category="工具选型",
         rubric="必须调 list_nodule_candidates 或 inspect_case 拿到两种编号，"
-        "结论里必须同时出现服务端编号与客户端编号，且体素量正确"
+        "结论里必须同时出现服务端编号与客户端编号（客户端的那个必须**对**，"
+        "真值从本次运行的工具返回体重算），且体素量正确"
         + (
             f"（{SERVER_1_VOXELS}，由当前病例的 manifest 派生）"
             if SERVER_1_VOXELS
@@ -118,8 +138,14 @@ CASES: tuple[EvalCase, ...] = (
         ),
         expect_tools=("list_nodule_candidates",),
         must_include=(str(SERVER_1_VOXELS),) if SERVER_1_VOXELS else (),
+        # 编号口径：回答必须把「服务端 1 号」与它**真正**的客户端编号绑在一起。
+        # 锚词取自题面（题面说「客户端编号」；同义改写那题说「界面上显示的编号」）。
+        expect_server_id=1,
+        client_id_anchors=("客户端", "界面", "本系统", "前端"),
         note="考察是否踩了 KB-04 里的编号坑。体素量期望值从病例 manifest 派生 —— "
-        "真实病例与合成夹具的服务端 1 号不是同一颗，写死会让本用例只在某一份数据上成立",
+        "真实病例与合成夹具的服务端 1 号不是同一颗，写死会让本用例只在某一份数据上成立。"
+        "客户端编号同理：真值由 client_id_from_calls 从工具返回体独立重算，"
+        "**踩坑与避坑的回答由此才真正分得开**（旧判据下两者同分，见 expect_server_id 的注释）",
     ),
     EvalCase(
         id="E03-器械可通过性",

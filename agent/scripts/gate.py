@@ -181,7 +181,7 @@ def _checks() -> list[Check]:
         ),
         Check(
             key="eval",
-            title="评测基线（15 用例 / 6 打分器）",
+            title="评测基线（15 用例 / 7 打分器）",
             argv=[
                 "-m",
                 "agent.scripts.run_eval",

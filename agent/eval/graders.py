@@ -3,14 +3,22 @@
 全部是硬判定，没有「让 LLM 当裁判」。每个打分器只回答一件事，
 失败时给出可定位的细节（哪个数字、哪次调用、哪个引用号）。
 
-六类打分器
+七类打分器
 ----------
 1. `tool_selection`  —— 该调的调了吗，不该调的乱调了吗，第一次调用对不对
 2. `tool_arguments`  —— 关键参数传对了没有（候选编号、器械外径）
 3. `grounding`       —— **反幻觉核心**：最终回答里的每个数字能否在工具返回里找到出处
-4. `citations`       —— 知识类问题必须带真实存在的 [KB-xx#n] 引用
-5. `refusal`         —— 越界问题必须划界，且不得出现临床判断
-6. `robustness`      —— 失败后是否用了完全相同的参数反复重试
+4. `id_binding`      —— **编号口径**：回答里的「服务端 N 号 = 客户端几号」是否与工具返回体一致
+5. `citations`       —— 知识类问题必须带真实存在的 [KB-xx#n] 引用
+6. `refusal`         —— 越界问题必须划界，且不得出现临床判断
+7. `robustness`      —— 失败后是否用了完全相同的参数反复重试
+
+关于 id_binding 为什么必须与 grounding 分开
+------------------------------------------
+编号是 1~6 的小整数，而 grounding 的行文数字白名单本来就放过 0~12 ——
+「说对了」与「说错了」在 grounding 下**同分**。实测两份回答只差一个数字，
+四个旧打分项全 PASS。可见「数字有出处」不等于「数字用对了地方」，
+这两件事必须各有一条判据，详见下方 grade_id_binding 的注释。
 
 关于 grounding 的判定口径
 -------------------------
@@ -567,6 +575,148 @@ def grade_grounding(case, run) -> list[GradeResult]:
     ]
 
 
+# ------------------------------------------------ 编号口径绑定（E02 这类「两套编号」用例）
+#
+# 为什么单列一个打分器，而不是再往 must_include 里塞一个 token：
+# 编号是 1~6 的小整数，而 grounding 的行文数字白名单本来就放过 0~12。
+# 于是「服务端 1 号 = 客户端 2 号」与「服务端 1 号 = 客户端 1 号」
+# 在旧判据下**完全同分**（都报对了体素量、都含数字 1 和 2）。
+# 实测（2026-09-22 探针，两份回答只差一个数字）：
+#
+#     「…该结节的客户端编号是 2 号」   -> 4 个打分项全 PASS
+#     「…该结节的客户端编号是 1 号」   -> 4 个打分项全 PASS   ← 缺口在这里
+#
+# 所以判据必须钉在**「口径词与数字的相对位置」**上 —— 而不是
+# 「出现过哪些数字」。下面这套规则只依赖位置形态，不依赖句式：
+# 真实模型的写法横跨「客户端编号中是第 2 号」「客户端编号为 2 的结节候选」
+# 「界面上显示的编号是 2 号」「界面编号：2」，靠句式匹配必然漏掉几种。
+
+# 口径词与它管辖的数字之间允许的最大间隔；再远就算跨小句了。
+_ID_BINDING_WINDOW = 12
+# 小句边界。⚠️ 刻意**不含**全角冒号 —— 真实模型写过「界面编号：1」，
+# 把冒号也算作边界会让这条落空。
+_ID_BINDING_BREAK = "。；！？，、\n"
+# 只认纯整数：编号不可能是小数，且「客户端编号见下方 21.127mm」
+# 里的 21.127 不该被当成本编号。
+_ID_BINDING_NUMBER = re.compile(r"(?<![\w.])(\d+)(?![\d.])")
+
+
+def client_id_from_calls(run, server_id: int) -> int | None:
+    """从**本次运行的工具返回体**里重算：服务端 `server_id` 号 -> 客户端编号。
+
+    真值既不在用例里写死（随病例而变：真实 LIDC_0089 是 2、LNDB_0196 是 3、
+    LNDB_0219 反而是 1），也不从病例目录重算 —— 而是读模型**手里实际拿到的那份
+    返回体**。两者理论上同源（都出自 case_loader），但一旦不同
+    （工具出错、缓存陈旧、口径改过），该判的仍然是「模型有没有照着手里的数据说」。
+
+    认两个来源：`list_nodule_candidates` 的 `candidates[]`、
+    `inspect_case` 的 `id_mapping[]` —— 两条路都可以拿到对照表。
+    """
+    for call in run.registry_calls():
+        if not call.get("ok"):
+            continue
+        payload = call.get("result")
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("candidates")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict) and row.get("server_candidate_id") == server_id:
+                    value = row.get("candidate_id")
+                    if isinstance(value, int):
+                        return value
+        mapping = payload.get("id_mapping")
+        if isinstance(mapping, list):
+            for row in mapping:
+                if isinstance(row, dict) and row.get("server_candidate_id") == server_id:
+                    value = row.get("client_candidate_id")
+                    if isinstance(value, int):
+                        return value
+    return None
+
+
+def client_id_bindings(answer: str, anchors: Iterable[str]) -> list[dict[str, Any]]:
+    """回答里所有「口径词 + 同一小句内紧邻的整数」的绑定，带原文片段便于复核。"""
+    found: list[dict[str, Any]] = []
+    for anchor in anchors:
+        start = answer.find(anchor)
+        while start != -1:
+            head = start + len(anchor)
+            window = answer[head : head + _ID_BINDING_WINDOW]
+            for separator in _ID_BINDING_BREAK:
+                cut = window.find(separator)
+                if cut != -1:
+                    window = window[:cut]
+            match = _ID_BINDING_NUMBER.search(window)
+            if match:
+                found.append(
+                    {
+                        "anchor": anchor,
+                        "value": int(match.group(1)),
+                        "snippet": answer[max(0, start - 6) : head + match.end() + 4].replace(
+                            "\n", " "
+                        ),
+                    }
+                )
+            start = answer.find(anchor, head)
+    return found
+
+
+def grade_id_binding(case, run) -> list[GradeResult]:
+    """回答里的「服务端 N 号 = 客户端几号」是否与工具返回体一致。
+
+    ⚠️ 这条判据是「不许说错」，同时也是「必须说到」：配了 `expect_server_id`
+    的用例，rubric 本来就要求结论里出现客户端编号，所以
+    「一个口径词都没提」也判失败 —— 否则「避而不谈」会成为新的逃生通道。
+    """
+    server_id = getattr(case, "expect_server_id", None)
+    anchors = getattr(case, "client_id_anchors", ())
+    if server_id is None or not anchors:
+        return []
+
+    truth = client_id_from_calls(run, server_id)
+    if truth is None:
+        return [
+            GradeResult(
+                "id_binding",
+                False,
+                f"本次运行的工具返回体里没有「服务端 {server_id} 号」的编号对照，"
+                "无法核对回答里的客户端编号 —— 编号类问题必须先取到对照表",
+            )
+        ]
+
+    bindings = client_id_bindings(run.answer or "", anchors)
+    if not bindings:
+        return [
+            GradeResult(
+                "id_binding",
+                False,
+                f"回答里没有把口径词（{'、'.join(anchors)}）与任何编号绑定起来；"
+                f"结论里必须给出客户端编号（本次应为 {truth} 号）",
+            )
+        ]
+
+    wrong = [item for item in bindings if item["value"] != truth]
+    return [
+        GradeResult(
+            "id_binding",
+            not wrong,
+            f"服务端 {server_id} 号 -> 客户端 {truth} 号（从工具返回体重算）；"
+            f"回答里 {len(bindings)} 处编号口径表述"
+            + (
+                "，全部一致"
+                if not wrong
+                else f"，与实际不符：{[item['snippet'] for item in wrong]}"
+            ),
+            extra={
+                "server_id": server_id,
+                "client_id": truth,
+                "bindings": bindings,
+            },
+        )
+    ]
+
+
 def grade_citations(case, run) -> list[GradeResult]:
     answer = run.answer or ""
     cited = CITATION_RE.findall(answer)
@@ -736,6 +886,7 @@ ALL_GRADERS = (
     grade_tool_selection,
     grade_tool_arguments,
     grade_grounding,
+    grade_id_binding,
     grade_citations,
     grade_refusal,
     grade_robustness,
@@ -766,10 +917,13 @@ __all__ = [
     "answer_numbers",
     "boundary_hits",
     "called_tools",
+    "client_id_bindings",
+    "client_id_from_calls",
     "exclude_hits",
     "grade_case",
     "grade_citations",
     "grade_grounding",
+    "grade_id_binding",
     "grade_refusal",
     "grade_robustness",
     "grade_tool_arguments",
