@@ -171,11 +171,20 @@ def build_plan(question: str) -> list[tuple[str, dict[str, Any]]]:
         ]
 
     if intent == "out_of_range":
+        # ⚠️ 2026-09-22：原来这里只有一条 `plan_route(candidate_id=99)` ——
+        # 也就是**不查病例就断言越界**，依据是题面里那五个字（规则表 key）。
+        # 这不是「规则引擎能力不够」，是它在**猜**：候选总数就摆在
+        # `inspect_case` 的 `case.candidate_count` 里，任何称职的规则实现
+        # 都会先读一眼再下结论。
+        # 被 E14 的新判据 `expect_tools=("inspect_case",)` 抓出来后补上。
+        # 顺带的收获是：这条判据**有区分度** —— 它把对照组的偷懒也照出来了。
+        # 保留 plan_route(99)：越界这条路径还要覆盖「失败调用的处理」。
         return [
+            ("inspect_case", {"case_id": CASE_ID}),
             (
                 "plan_route",
                 {"case_id": CASE_ID, "candidate_id": 99, "device_diameter_mm": 2.0},
-            )
+            ),
         ]
 
     # baseline：完整链路
