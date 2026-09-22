@@ -8,31 +8,28 @@
 """
 from __future__ import annotations
 
-import ctypes
 import sys
 
-
-class _MemoryStatus(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", ctypes.c_ulong),
-        ("dwMemoryLoad", ctypes.c_ulong),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
+from agent.core.sysmem import read_memory
 
 
 def probe() -> tuple[float, float]:
-    """返回 (当前进程已提交 MB, 系统可用物理内存 MB)。"""
-    status = _MemoryStatus()
-    status.dwLength = ctypes.sizeof(_MemoryStatus)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    committed = (status.ullTotalPageFile - status.ullAvailPageFile) / 1024**2
-    return committed, status.ullAvailPhys / 1024**2
+    """返回 (当前进程已提交 MB, 系统可用物理内存 MB)。
+
+    读数来自 `agent.core.sysmem` —— 本仓库唯一一份内存读数实现（本文件原先自带的
+    那份 `MEMORYSTATUSEX` 与 `measure_memory.py`、`verify_geometry.py` 逐字节相同，
+    已合并，见该模块文档）。
+
+    读不到时返回 `(nan, nan)`，**不伪装成 0**：0 会让上面的差值显示读成
+    「内存耗尽」，而真相是「这个平台读不到」。
+    """
+    reading = read_memory()
+    committed = reading.committed_mib
+    available = reading.available_mib
+    return (
+        float("nan") if committed is None else committed,
+        float("nan") if available is None else available,
+    )
 
 
 def main(argv: list[str]) -> int:

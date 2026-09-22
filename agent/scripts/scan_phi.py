@@ -523,7 +523,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.selftest_only:
         return 1 if failures else 0
 
-    roots = [Path(p) for p in args.root] if args.root else [ROOT / "cases", ROOT / "api_data"]
+    # ⚠️ 原来这里硬编码 `ROOT / "cases"`。真实病例缺席的机器上（含全新 clone），
+    # 这一项会去扫一个不存在的目录 → 「0 命中」→ 报通过。
+    # 那是**假通过**：没扫到东西不是因为干净，是因为没扫。跟着 cases_root() 走。
+    if args.root:
+        roots = [Path(p) for p in args.root]
+    else:
+        from agent.core.case_loader import cases_root, cases_root_provenance
+
+        provenance = cases_root_provenance()
+        roots = [cases_root(), ROOT / "api_data"]
+        print(f"病例数据来历：{provenance['kind']} —— {provenance['note']}")
     report = Report()
     print("\n[扫描] 数据面")
     for root in roots:

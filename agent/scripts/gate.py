@@ -71,6 +71,16 @@ class Check:
     ok: bool = False
     seconds: float = 0.0
     detail: str = ""
+    # 三态之一：`ok` / `bad` / `none`（由 runner 回填）。
+    #
+    # 为什么需要第三态：有些检查项**跑不起来** —— 夹具上没有 V1 保存的对拍结果、
+    # 机器上没有 node、用例依赖真实病例而当前只有合成夹具。原来看
+    # `returncode == 0` 只有两态，于是「没做」被记成了「做对了」，
+    # 一个硬门禁就这样静默空转（判断纪律：不测就等于没有）。
+    #
+    # 约定：子进程 `returncode == 2` 表示**主动声明「不足以判定」**。
+    # 门禁据此刻 `none`，报告里显示 ⚪，并且**不能**显示成通过。
+    status: str = ""
     output_tail: list[str] = field(default_factory=list)
 
 
@@ -260,8 +270,10 @@ def _child_env(scratch: Path, check: Check) -> dict[str, str]:
 def run_check(check: Check, python: str, node: str | None, scratch: Path) -> Check:
     if check.needs == "node":
         if not node:
+            # 这是「没做」，不是「做错了」—— 归 `none`，别归 `bad`。
             check.ok = False
-            check.detail = "跳过：找不到 node"
+            check.status = "none"
+            check.detail = "不足以判定：找不到 node（补齐：装 Node 20+ 后重跑本项）"
             return check
         argv = [node, *check.argv]
     else:
@@ -278,15 +290,22 @@ def run_check(check: Check, python: str, node: str | None, scratch: Path) -> Che
         )
         raw = (proc.stdout or b"") + (proc.stderr or b"")
         text = _decode(raw)
-        check.ok = proc.returncode == 0
+        # 三态：0=通过；2=**不足以判定**（脚本主动声明，见 Check.status 注释）；
+        # 其余非 0 一律算失败。
+        check.status = "ok" if proc.returncode == 0 else (
+            "none" if proc.returncode == 2 else "bad"
+        )
+        check.ok = check.status == "ok"
         check.detail = f"exit={proc.returncode}"
     except subprocess.TimeoutExpired:
         text = f"超时（>{check.timeout}s）"
         check.ok = False
+        check.status = "bad"
         check.detail = "timeout"
     except OSError as error:  # 解释器不存在之类
         text = f"{type(error).__name__}: {error}"
         check.ok = False
+        check.status = "bad"
         check.detail = "launch failed"
     check.seconds = round(time.time() - started, 1)
 
@@ -372,8 +391,21 @@ def compare_baseline(eval_summary: dict | None, update: bool) -> tuple[bool, lis
         ok = False
         notes.append("❌ 用例总数少于基线 —— 用例被删了，评测尺子变短了")
     if eval_summary.get("all_graders_pass") is False:
-        ok = False
-        notes.append("❌ 有打分器自检未通过（植入缺陷未被抓住）")
+        # ⚠️ 这里原本写的是「❌ 有打分器自检未通过（植入缺陷未被抓住）」—— **文案与事实不符**。
+        # `harness.EvalReport.all_graders_pass()` 的语义是「**所有用例的所有评分项都通过**」
+        # （等价于 pass_rate == 1.0），与「打分器自检」（`agent.eval.selftest`，门禁里另有
+        # 一项 `graders`）是两回事。
+        # 实测（合成夹具上跑 --profile ci）：本字段为 false，而 `graders` 项 ✅ 2.4s ——
+        # 植入缺陷确实被抓住了，却被这行报成「自检未通过」，**方向正好反了**。
+        #
+        # 也不再设 ok = False：本字段为假 ⟺ 存在未通过的评分项，而基线存在时这必然与
+        # 上面「通过数低于基线」同时命中，同一个事实记成两处失败会让报告看起来像两个
+        # 问题。它真正的独立信号只有一个：**基线已被下调（接受了该水平）时**仍提示
+        # 「并非全绿」。所以保留为一句话说明，而不是删掉。
+        notes.append(
+            "ℹ️ 本次评测并非全绿（存在未通过的评分项）"
+            " —— 这与「打分器自检」无关，是否算失败由上面两条门槛决定"
+        )
     if ok:
         notes.append("✅ 未低于基线")
     return ok, notes
@@ -382,15 +414,28 @@ def compare_baseline(eval_summary: dict | None, update: bool) -> tuple[bool, lis
 # ------------------------------------------------------------------ 报告
 
 
+def _verdict_label(payload: dict) -> str:
+    """报告里的结论词。三态，不是布尔。"""
+    if payload.get("failed_checks"):
+        return "未通过"
+    if payload.get("undecided_checks"):
+        return "不足以判定"
+    return "通过"
+
+
 def write_reports(checks: list[Check], eval_summary, baseline_ok, baseline_notes, profile: str) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    failed = [c for c in checks if not c.ok]
+    failed = [c for c in checks if c.status == "bad"]
+    undecided = [c for c in checks if c.status == "none"]
     payload = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "profile": profile,
-        "passed": not failed and baseline_ok,
+        # ⚠️ `passed` 的含义**收紧了**：有「不足以判定」也不算通过。
+        # 原来只有「有没有失败」一个维度，于是少跑了几项没人知道。
+        "passed": not failed and not undecided and baseline_ok,
         "total_checks": len(checks),
         "failed_checks": [c.key for c in failed],
+        "undecided_checks": [c.key for c in undecided],
         "checks": [
             {
                 "key": c.key,
@@ -399,6 +444,7 @@ def write_reports(checks: list[Check], eval_summary, baseline_ok, baseline_notes
                 "hard": c.hard,
                 "needs_cases": c.needs_cases,
                 "ok": c.ok,
+                "status": c.status,
                 "seconds": c.seconds,
                 "detail": c.detail,
                 "tail": c.output_tail,
@@ -418,14 +464,15 @@ def write_reports(checks: list[Check], eval_summary, baseline_ok, baseline_notes
         "",
         f"- 时间：{payload['generated_at']}",
         f"- 档位：`{profile}`",
-        f"- 结论：**{'通过' if payload['passed'] else '未通过'}**"
-        f"（{len(checks) - len(failed)}/{len(checks)} 项通过）",
+        f"- 结论：**{_verdict_label(payload)}**"
+        f"（共 {len(checks)} 项：{len(checks) - len(failed) - len(undecided)} 通过 / "
+        f"{len(failed)} 失败 / {len(undecided)} 不足以判定）",
         "",
         "| 检查 | 类别 | 硬门禁 | 结果 | 耗时 | 说明 |",
         "|---|---|---|---|---|---|",
     ]
     for check in checks:
-        mark = "✅" if check.ok else "❌"
+        mark = {"ok": "✅", "bad": "❌", "none": "⚪"}.get(check.status, "❌")
         lines.append(
             f"| {check.title} | {check.category} | {'是' if check.hard else '—'} | {mark} | "
             f"{check.seconds}s | {check.detail} |"
@@ -444,6 +491,20 @@ def write_reports(checks: list[Check], eval_summary, baseline_ok, baseline_notes
         lines += ["", "## 失败明细", ""]
         for check in failed:
             lines += [f"### {check.title}", "", f"```text", *check.output_tail, "```", ""]
+    if undecided:
+        # 单列一节：这些项**不是**通过，也不该被埋在失败里 —— 它们是「没做成」。
+        lines += ["", "## 不足以判定（缺数据 ≠ 通过）", ""]
+        for check in undecided:
+            lines += [
+                f"### {check.title}",
+                "",
+                f"{check.detail}",
+                "",
+                "```text",
+                *check.output_tail,
+                "```",
+                "",
+            ]
     REPORT_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -473,7 +534,13 @@ def main() -> int:
         return 0
 
     if args.profile == "ci":
-        checks = [c for c in checks if not c.needs_cases]
+        # ⚠️ 这里原来把所有 `needs_cases` 的项**整项滤掉**：干净 clone 上
+        # 13 项只剩 8 项，而且从报告里**看不出少了什么**（不是 ⚪，是不存在）。
+        # 现在仓库里带了合成夹具 `fixtures/cases`（~25KB/例），这些项能真跑了，
+        # 所以不再滤掉：跑得动的跑，跑不动的自己声明 `none`（⚪）——
+        # 在报告里是一行看得见的「不足以判定」，而不是一行空白。
+        # 保留 `ci` 这个档位名是为了不破坏既有脚本与文档。
+        pass
     if args.fast:
         checks = [c for c in checks if c.key != "eval"]
     if args.only:
@@ -495,13 +562,14 @@ def main() -> int:
     print("=" * 70)
 
     scratch = Path(tempfile.mkdtemp(prefix="airnav_gate_"))
-    passed, failed = [], []
+    passed, failed, undecided = [], [], []
     try:
         for check in checks:
             print(f"▶ {check.title} …", end="", flush=True)
             run_check(check, python, node, scratch)
-            print(f" {'✅' if check.ok else '❌'} {check.seconds}s  {check.detail}")
-            (passed if check.ok else failed).append(check)
+            mark = {"ok": "✅", "bad": "❌", "none": "⚪"}.get(check.status, "❌")
+            print(f" {mark} {check.seconds}s  {check.detail}")
+            {"ok": passed, "bad": failed, "none": undecided}[check.status].append(check)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -516,16 +584,31 @@ def main() -> int:
     for note in baseline_notes:
         print(note)
     print("-" * 70)
-    verdict = not failed and baseline_ok
-    print(f"结论：{'✅ 全绿' if verdict else '❌ 未通过'}  ({len(passed)}/{len(checks)} 项)")
+    verdict = not failed and not undecided and baseline_ok
+    if failed:
+        label = "❌ 未通过"
+    elif undecided:
+        # 有「不足以判定」而无失败 —— **不许说通过**。缺数据 ≠ 通过。
+        label = "⚪ 不足以判定"
+    else:
+        label = "✅ 全绿"
+    print(f"结论：{label}  ({len(passed)} 通过 / {len(failed)} 失败 / "
+          f"{len(undecided)} 不足以判定，共 {len(checks)} 项)")
     if failed:
         print("失败项：" + "、".join(c.key for c in failed))
         for check in failed:
             print(f"\n--- {check.title} 末尾输出 ---")
             for line in check.output_tail:
                 print("  " + line)
+    if undecided:
+        print("不足以判定：" + "、".join(c.key for c in undecided))
+        for check in undecided:
+            print(f"  · {check.title}：{check.detail}")
     print(f"报告：{REPORT_MD}")
-    return 0 if verdict else 1
+    # 退出码只由**失败**决定：无真实病例的机器上，「不足以判定」是预期状态，
+    # 不该让 CI 永远红着（红了就等于没人看）。但报告与终端的结论词已经
+    # 明确写着「不足以判定」而不是「通过」，两者不冲突。
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

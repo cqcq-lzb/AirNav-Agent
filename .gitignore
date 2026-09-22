@@ -35,7 +35,19 @@ htmlcov/
 
 # ---------- 病例数据（1.9G DICOM）----------
 # 真实病例数据体积大且涉及隐私，绝不入库
+#
+# 🔴 `cases/` **匹配任意层级**的 cases 目录 —— 包括 fixtures/cases。
+#    而合成夹具是**必须入库**的（~25KB/例）：干净 clone 上一项依赖病例的
+#    门禁都跑不了（planner / loop / payloads / phi / eval，其中 eval 是硬门禁），
+#    于是仓库里最值钱的那批资产恰恰最不可被外人验证。
+#    实测本条曾把夹具静默挡在门外：`git check-ignore -v` → `.gitignore:38:cases/`。
+#
+#    放行要两步，缺一不可：先放行目录本身，再放行其内容 ——
+#    **父目录被排除时，子级例外不生效**（gitignore 的已知语义）。
 cases/
+!fixtures/cases/
+!fixtures/cases/**
+
 api_data/
 
 # ---------- 🔴 本机 DLP 托管文件（git 读不到真实内容）----------

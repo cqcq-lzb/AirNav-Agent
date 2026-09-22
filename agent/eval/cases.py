@@ -14,10 +14,53 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 CASE_ID = "LIDC_0089"
+
+
+def _server_candidate_voxels(server_id: int) -> int | None:
+    """服务端 `server_id` 号结节的体素量 —— 从**当前病例**的 manifest 派生。
+
+    ⚠️ 为什么不写成常量：E02 考的是「两套编号的对应关系」+「体素量报对了」，
+    这两件事在真实病例与合成夹具上都应当成立 —— 但它们的体素量**必然不同**
+    （真实 LIDC_0089 的服务端 1 号是 2935 体素，合成夹具的服务端 1 号是 123）。
+    写死就成了一条「只在某一份数据上成立」的脆弱断言：干净 clone 上必挂
+    （实测：`--profile ci` + 夹具时 E02 挂在「应包含 ['2935']」）。
+
+    这与「把尺子放松」是两回事：**要考什么没变**（结论必须报出该候选的体素量），
+    变的只是「哪个数是正确答案」—— 而正确答案本来就该从数据里读，不该抄在尺子上。
+
+    读不到时返回 None，调用方据此**不设**这条断言（并在 rubric 里写明未启用），
+    而不是塞一个假的期望值进去 —— 缺数据 ≠ 可以假装有数据。
+    """
+    from agent.core import case_loader
+
+    try:
+        path = (
+            Path(case_loader.cases_root())
+            / CASE_ID
+            / "stage4_package"
+            / "stage4_manifest.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    for item in payload.get("candidates", []):
+        try:
+            if int(item.get("candidate_id")) == server_id:
+                return int(item["voxel_count"])
+        except (TypeError, ValueError, KeyError):
+            continue
+    return None
+
+
+# 服务端 1 号结节的体素量：真实病例 2935 / 合成夹具 123
+SERVER_1_VOXELS = _server_candidate_voxels(1)
 
 
 @dataclass
@@ -67,10 +110,16 @@ CASES: tuple[EvalCase, ...] = (
         ),
         category="工具选型",
         rubric="必须调 list_nodule_candidates 或 inspect_case 拿到两种编号，"
-        "结论里必须同时出现服务端编号与客户端编号，且体素量正确（2935）",
+        "结论里必须同时出现服务端编号与客户端编号，且体素量正确"
+        + (
+            f"（{SERVER_1_VOXELS}，由当前病例的 manifest 派生）"
+            if SERVER_1_VOXELS
+            else "（⚠️ 未能从病例 manifest 读到体素量，这条断言本次未启用）"
+        ),
         expect_tools=("list_nodule_candidates",),
-        must_include=("2935",),
-        note="考察是否踩了 KB-04 里的编号坑",
+        must_include=(str(SERVER_1_VOXELS),) if SERVER_1_VOXELS else (),
+        note="考察是否踩了 KB-04 里的编号坑。体素量期望值从病例 manifest 派生 —— "
+        "真实病例与合成夹具的服务端 1 号不是同一颗，写死会让本用例只在某一份数据上成立",
     ),
     EvalCase(
         id="E03-器械可通过性",

@@ -8,36 +8,28 @@
 """
 from __future__ import annotations
 
-import ctypes
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-class _MemoryStatus(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", ctypes.c_ulong),
-        ("dwMemoryLoad", ctypes.c_ulong),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
+from agent.core.sysmem import read_memory  # noqa: E402
 
 
 def system_memory() -> tuple[float, float]:
-    """返回 (本进程已提交 MB, 系统可用物理 MB)。"""
-    status = _MemoryStatus()
-    status.dwLength = ctypes.sizeof(_MemoryStatus)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    """返回 (本进程已提交 MB, 系统可用物理 MB)。
+
+    读数来自 `agent.core.sysmem` —— 本仓库唯一一份内存读数实现（本文件原先自带的
+    那份 `MEMORYSTATUSEX` 与 `_memprobe.py`、`verify_geometry.py` 逐字节相同，已合并）。
+    读不到时返回 `(nan, nan)`，不伪装成 0。
+    """
+    reading = read_memory()
+    committed = reading.committed_mib
+    available = reading.available_mib
     return (
-        (status.ullTotalPageFile - status.ullAvailPageFile) / 1024**2,
-        status.ullAvailPhys / 1024**2,
+        float("nan") if committed is None else committed,
+        float("nan") if available is None else available,
     )
 
 

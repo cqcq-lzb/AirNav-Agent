@@ -3,10 +3,17 @@ name: regression gate
 # 回归门禁：把「改动前先过回归」从习惯变成流水线。
 #
 # ⚠️ 已知边界（别假装没有）：
-#   1. `cases/`（1.9GB 真实病例）**不入库**（隐私 + 体积，见 .gitignore），
-#      所以全新 clone 里 verify_planner / verify_payloads / run_eval 跑不了。
-#      本工作流因此只跑 `--profile ci`（不依赖病例数据的子集）。
-#      想在 CI 上跑全量，必须提供脱敏 fixture 或自建 runner —— 属待办，不属已完成。
+#   1. `cases/`（1.9GB 真实病例）**不入库**（隐私 + 体积，见 .gitignore）。
+#      → 已解决：仓库自带**合成夹具** `fixtures/cases`（24.4 KB/例，见
+#        `docs/合成夹具.md`）。case_loader 在真实病例缺席时兜底到它，
+#        于是 `--profile ci` 现在跑**全部 13 项**（不再是「不依赖病例的子集」）。
+#
+#        ⚠️ 其中 `planner` 会明确报 ⚪「不足以判定」：夹具没有 `interactive_plans/`，
+#        与 V1 GUI 的数值对拍**没做** —— 是「没做」，不是「做对了」。
+#        ⚪ 不设退出码 1（否则干净副本上的 CI 永远红着，门禁就没人看了），
+#        但它也**不**算通过（`passed = not failed and not undecided and baseline_ok`）。
+#
+#        仍然跑不了的只有真模型评测（见下条）。
 #   2. 评测基线用的是 `heuristic` 规则基线后端：确定性、不联网、不需要 GPU。
 #      真模型评测（gpu41 / qwen2.5:14b）依赖内网与 GPU，留在本地手动跑。
 #
@@ -32,16 +39,22 @@ jobs:
           python-version: "3.10"
           cache: pip
 
+      # SimpleITK 是读夹具里的 .nii.gz 用的（case_loader / verify_geometry）。
+      # **不要省**：缺了它 `geometry`（硬门禁）与所有依赖病例的项会直接报错。
       - name: Install runtime deps for offline checks
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy scipy starlette uvicorn
+          python -m pip install numpy scipy starlette uvicorn SimpleITK
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Run regression gate (ci profile)
+        # 显式指向合成夹具，让「这份数据是哪来的」在报告里一目了然。
+        # （不设也能跑 —— case_loader 会兜底到 fixtures/cases，但显式更清楚。）
+        env:
+          AIRNAV_CASES_DIR: ${{ github.workspace }}/fixtures/cases
         run: python -m agent.scripts.gate --profile ci
 
       - name: Upload gate report

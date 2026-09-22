@@ -57,11 +57,32 @@ def diff(expected: dict, actual: dict, keys: list[str]) -> list[str]:
     return out
 
 
+def _default_case_dir() -> str:
+    """挑一个可用的病例目录（优先 LIDC_0089，否则取第一个）。
+
+    ⚠️ 原来这里硬编码 `<repo>/cases/LIDC_0089/stage4_package`。真实病例缺席的
+    机器上（含全新 clone），那一项是**硬门禁**，却指着一个不存在的目录 ——
+    于是它要么直接报错，要么被 `--profile ci` 整项滤掉、从报告里消失。
+    跟着 `cases_root()` 走，夹具才能真正顶上来。
+    """
+    from agent.core.case_loader import cases_root, list_local_cases
+
+    root = cases_root()
+    preferred = root / "LIDC_0089" / "stage4_package"
+    if preferred.is_dir():
+        return str(preferred)
+    found = list_local_cases(root)
+    if not found:
+        raise SystemExit(f"找不到任何病例：{root}")
+    return str(found[0]["package_dir"])
+
+
 def main() -> int:
-    root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case-dir", default=str(root / "cases" / "LIDC_0089" / "stage4_package"))
+    parser.add_argument("--case-dir", default=None)
     args = parser.parse_args()
+    if args.case_dir is None:
+        args.case_dir = _default_case_dir()
 
     case_dir = Path(args.case_dir).resolve()
     case = load_case(case_dir)
@@ -100,8 +121,22 @@ def main() -> int:
     plan_dir = case_dir / "interactive_plans"
     saved_files = sorted(plan_dir.glob("nodule_*_plan.json")) if plan_dir.is_dir() else []
     if not saved_files:
-        print("\n[跳过对照] 没有找到 GUI 保存的规划结果")
-        return 0
+        # ⚠️ 这里**不能返回 0**。
+        #
+        # 这个脚本有两半：前半「把 4 个候选都规划一遍」（任何病例都能跑），
+        # 后半「与 V1 GUI 保存的结果逐位对拍」（只有真实病例才有对照物）。
+        # 合成夹具没有 interactive_plans/，于是后半就是**没做**。
+        # 原来这里 `return 0` —— 结果「没做」和「做对了」在门禁里长得一模一样，
+        # 一个硬门禁就这样静默退化成了空转（判断纪律：不测就等于没有）。
+        #
+        # 按三态纪律：缺数据 ≠ 通过。退出码 2 = **不足以判定**，
+        # 门禁会把它记成 `none` 而不是 `✅`，并带上下面这条补齐命令。
+        print("\n[跳过对照] 没有找到 GUI 保存的规划结果 —— 数值对拍**未执行**")
+        print(f"  病例目录：{case_dir}")
+        print("  上述 4 个候选的规划数字只说明「跑起来了」，**不能**证明与 V1 一致。")
+        print("  补齐：在装有真实病例的机器上重跑本项（cases/LIDC_0089 里有")
+        print("        interactive_plans/nodule_XX_plan.json 时才会做逐位对拍）。")
+        return 2
 
     print("\n" + "=" * 72)
     print("与 GUI 保存结果逐项对照")

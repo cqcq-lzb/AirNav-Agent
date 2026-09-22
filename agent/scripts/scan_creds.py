@@ -66,6 +66,46 @@ WEAK_LITERALS = {"123456", "password", "admin", "root", "test", "abc123", "1234"
 
 DLP_MAGIC = b"%TSD-Header-###%"
 
+# ⚠️ 为什么不能直接用「全文含 NUL」当 DLP 填充的判据 —— 两种形态必须分开：
+#   · DLP 的块对齐填充是**尾部**补 \x00，正文是干净的文本
+#   · 二进制文件（.nii.gz / .png / 权重）的 NUL **散布全文**
+#   混在一起，每一份二进制都会被判成「DLP 改写」。
+#   实测（首次把合成夹具入库时）：4 个 .nii.gz 全部误报，而它们其实
+#   gzip magic=1f8b、可正常解压、**暂存区与磁盘逐字节相同**，
+#   大小 16786 / 4105 / 1694 / 1814 也都不是 4096 的整数倍。
+#
+# ⚠️ 也**不能**只靠「首块 8000 字节有没有 NUL」—— 那会漏报**短文件**：
+#   一个 20 字节的 .py 被填充到块对齐，NUL 就落在首块里了。
+
+
+def nul_only_at_tail(raw: bytes) -> bool:
+    """NUL 是否**只出现在尾部**（＝文本文件被块对齐填充的特征）。
+
+    去掉尾部连续 NUL 之后如果还有 NUL，说明 NUL 散布在正文里 —— 那是二进制。
+
+    ⚠️ 边界：一个**整份都是 NUL** 的文件会判成「只在尾部」→ 报填充。
+    偏保守，但这类文件本身就不该出现在仓库里（宁误报，别放过）。
+    """
+    return b"\x00" not in raw.rstrip(b"\x00")
+
+
+def looks_binary(path: Path, raw: bytes) -> bool:
+    """这份内容是不是二进制文件。返回 True ＝ **不**做 NUL 填充检查。
+
+    判据：
+    1. 扩展名在 `EXCLUDE_EXT` 里 —— 项目既有机制（`.nii.gz` 的 suffix 是 `.gz`）
+    2. 否则看 NUL 的**分布**：完全没有 NUL → 文本；
+       NUL 只在尾部 → 是被填充的文本（**不是**二进制，要继续查）；
+       NUL 散布全文 → 二进制
+
+    ⚠️ `DLP_MAGIC` 密文检查对二进制**仍然生效** —— 那才是二进制也会中的招。
+    """
+    if path.suffix.lower() in EXCLUDE_EXT:
+        return True
+    if b"\x00" not in raw:
+        return False
+    return not nul_only_at_tail(raw)
+
 
 def iter_trackable_files() -> list[Path] | None:
     """列出「git 会管的文件」= 已跟踪 + 未跟踪但未被忽略。
@@ -234,6 +274,10 @@ def check_staged() -> tuple[int, list[tuple[str, str, str]]]:
         raw = blob.stdout
         if raw.startswith(DLP_MAGIC):
             findings.append(("密文", rel, f"暂存的是 DLP 密文（长度 {len(raw)}）→ 千万不要提交"))
+            continue
+        if looks_binary(Path(rel), raw):
+            # 二进制文件：里面的 NUL 是内容本身，不是 DLP 填充。
+            # 文本类检查（凭据正则、编码）对二进制也没有意义，直接跳过。
             continue
         if b"\x00" in raw:
             findings.append(("填充", rel, "暂存内容含 NUL 字节（DLP 块对齐填充）"))

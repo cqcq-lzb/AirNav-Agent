@@ -19,6 +19,13 @@
 用法：
     python -m agent.scripts.verify_geometry                  # 全部
     python -m agent.scripts.verify_geometry --only synthetic  # 只跑合成
+
+退出码（三态，与门禁的 ok/bad/none 对应）：
+    0  → 通过
+    1  → 未通过（对拍不一致 —— 这是真回归）
+    2  → **不足以判定**：整卷 EDT 要 882MB 特征数组，这台机器此刻腾不出来。
+         这不是几何实现的问题，因此**不能**记成失败（在门禁里长得跟真回归一样），
+         也**绝不能**记成通过。按「缺数据 ≠ 通过」单列为 ⚪ 并给出补齐命令。
 """
 from __future__ import annotations
 
@@ -35,10 +42,68 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from agent.core import geometry  # noqa: E402
+from agent.core.sysmem import available_bytes as _sysmem_available_bytes  # noqa: E402
 
 CASE_ID = "LIDC_0089"
 SAMPLE_POINTS = 200_000
 SEED = 20260916
+
+
+# ---------------------------------------------------------------- 内存预算
+#
+# scipy 的 EDT 要一次性分配 `(3, *体素数)` 的 float64 特征变换数组 —— 本项目
+# 真实病例上是 882MB。这台机器（32GB）平时够用，但会话里多开几个 python 进程 /
+# 病例缓存 / Docker 之后就未必了。
+#
+# ⚠️ 为什么要**提前**算而不是 `except MemoryError`：
+#   捕获异常的话，「机器腾不出内存」与「几何实现漂了」都会走进同一个 except，
+#   于是一个偶发的环境抖动被写成 ❌ —— 上一轮就是这样，害得以为发生了回归。
+#   反过来把它写成 ✅ 更糟。所以：分配前先算需求，看可用量，不够就明确报 ⚪。
+
+EDT_SAFETY = 1.3      # 安全余量：EDT 内部除特征数组外还有输入掩膜与返回的距离场
+
+
+def _available_bytes() -> int | None:
+    """当前可用物理内存（字节）。取不到返回 None（＝不知道，不拦）。
+
+    读数来自 `agent.core.sysmem` —— 本仓库唯一一份内存读数实现。
+    ⚠️ **不要**在这里再抄一份 `ctypes` 结构体：本仓库曾经有三份逐字节相同的
+    `MEMORYSTATUSEX`，而字段写错时 `GlobalMemoryStatusEx` 不会报错，
+    只会把数填进错位的字段，于是「可用内存」悄悄变成别的量。
+    这层包装是为了让测试能替换本函数（monkeypatch `_available_bytes`）。
+    """
+    return _sysmem_available_bytes()
+
+
+def _edt_memory_need(size: int) -> int:
+    """`ndi.distance_transform_edt` 在一卷 `size` 体素上的峰值内存估算（字节）。
+
+    主开销是 3 个 float64 特征数组，另有返回的距离场（float64）与输入掩膜（bool）。
+    """
+    return int(EDT_SAFETY * (3 * size * 8 + size * 8 + size))
+
+
+def _memory_gate(only: str, size: int) -> bool:
+    """够不够跑整卷 EDT。True ＝ 可以跑；False ＝ 调用方应返回 None（不足以判定）。"""
+    need = _edt_memory_need(size)
+    avail = _available_bytes()
+    if avail is None:
+        print(f"         ⚠️  可用内存取不到（{sys.platform}）—— 不拦，直接尝试")
+        return True
+    print(
+        f"         内存预算：整卷 EDT 峰值 ≈{need / 2**20:,.0f} MB"
+        f"（其中特征数组 {3 * size * 8 / 2**20:,.0f} MB），"
+        f"当前可用 {avail / 2**20:,.0f} MB"
+    )
+    if avail >= need:
+        return True
+    gap = need - avail
+    gap_text = f"{gap / 2**20:,.1f} MB" if gap >= 2**20 else f"{gap:,} 字节"
+    print(f"         ⚪ 可用内存不足（还差 {gap_text}）—— 本项**不足以判定**")
+    print("            这不是几何实现的问题，是这台机器此刻腾不出整卷 EDT 的内存。")
+    print("            补齐：关掉占内存的进程（浏览器 / 其它 python / Docker）后单跑：")
+    print(f"              python -m agent.scripts.verify_geometry --only {only}")
+    return False
 
 
 # ------------------------------------------------------------------ 比对
@@ -179,7 +244,8 @@ def _sample_coords(shape, rng) -> np.ndarray:
     ).astype(np.int64)
 
 
-def check_real_radius() -> bool:
+def check_real_radius() -> bool | None:
+    """真实病例半径场对拍。None ＝ 内存不够，不足以判定（不是失败）。"""
     print("\n[2] 真实病例 · 半径场")
     airway, _nodule, spacing = _case_arrays()
     voxels = int(airway.sum())
@@ -197,6 +263,9 @@ def check_real_radius() -> bool:
         f"  →  KD 树坐标 {tree_bytes / 2**20:,.2f} MB"
         f"（{edt_bytes / max(tree_bytes, 1):,.0f}×）"
     )
+
+    if not _memory_gate("radius", int(airway.size)):
+        return None
 
     rng = np.random.default_rng(SEED)
     coords = _sample_coords(airway.shape, rng)
@@ -216,10 +285,14 @@ def check_real_radius() -> bool:
     return ok
 
 
-def check_real_distance() -> bool:
+def check_real_distance() -> bool | None:
+    """真实病例靶点距离对拍。None ＝ 内存不够，不足以判定（不是失败）。"""
     print("\n[3] 真实病例 · 靶点距离")
     _airway, nodule, spacing = _case_arrays()
     print(f"         结节掩膜 {nodule.shape}，体素 {int(nodule.sum()):,}")
+
+    if not _memory_gate("distance", int(nodule.size)):
+        return None
 
     rng = np.random.default_rng(SEED + 1)
     coords = _sample_coords(nodule.shape, rng)
@@ -254,7 +327,7 @@ def main() -> int:
     print("geometry.py 与 scipy distance_transform_edt 等价性对拍")
     print("=" * 78)
 
-    results: list[tuple[str, bool]] = []
+    results: list[tuple[str, bool | None]] = []
     if args.only in ("all", "synthetic"):
         results.append(("合成体积穷举", check_synthetic()))
     if args.only in ("all", "radius"):
@@ -263,18 +336,29 @@ def main() -> int:
         results.append(("真实病例 · 靶点距离", check_real_distance()))
 
     print("\n" + "=" * 78)
+    word = {True: "通过", False: "未通过", None: "不足以判定"}
     for label, ok in results:
-        print(f"  {label}：{'通过' if ok else '未通过'}")
-    all_ok = all(ok for _, ok in results)
-    if all_ok:
+        print(f"  {label}：{word.get(ok, '未知')}")
+
+    failed = [label for label, ok in results if ok is False]
+    undecided = [label for label, ok in results if ok is None]
+
+    if not failed and not undecided:
         print(
             "\n对拍通过：新实现与 scipy EDT 在本项目使用的场景下等价"
             "（差异 ≤ 1e-12 mm，为双精度末位舍入）"
         )
         print("下游规划数值是否与 V1 一致，由 verify_planner 回归把关。")
-    else:
-        print("\n对拍未通过")
-    return 0 if all_ok else 1
+        return 0
+    if not failed:
+        print(f"\n⚪ 不足以判定：{len(undecided)} 项没跑成 —— {'、'.join(undecided)}")
+        print("   按「缺数据 ≠ 通过」：本次既不能说等价，也不能说不等价。")
+        print("   每项的补齐命令已在上面给出。")
+        return 2
+    print(f"\n对拍未通过：{'、'.join(failed)}")
+    if undecided:
+        print(f"（另有 {len(undecided)} 项不足以判定：{'、'.join(undecided)}）")
+    return 1
 
 
 if __name__ == "__main__":

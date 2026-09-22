@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,10 @@ from . import geometry
 from .navbridge import choose_entry_node_no_edt, nav
 
 REQUIRED_FILES = ("ct.nii.gz", "airway_mask.nii.gz", "nodule_raw.nii.gz")
+
+# 合成夹具根目录（随仓库入库，体积 ~25KB/例）。
+# 只在 `<repo>/cases` 缺席时兜底，且来历会被显式标出来 —— 见 cases_root()。
+FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "cases"
 
 DEFAULT_MIN_NODULE_VOXELS = 8
 DEFAULT_MAX_TARGET_NODES = 6
@@ -153,6 +158,9 @@ class CaseContext:
         return {
             "case_id": self.case_id,
             "case_dir": str(self.case_dir),
+            # ⚠️ 合成夹具必须在返回体里自报家门 —— 否则「这个病例的数字哪来的」
+            # 就没法从工具输出本身回答，报告也可能把夹具当成真实病例。
+            "fixture": is_fixture(self.case_dir),
             "voxel_size_mm": [round(float(v), 4) for v in self.spacing_zyx],
             "volume_shape_zyx": list(self.airway_mask.shape),
             "airway_voxels": int(self.airway_mask.sum()),
@@ -420,9 +428,86 @@ def load_case(
 
 
 def cases_root() -> Path:
+    """病例根目录。三档来源，且**来历必须可查**（`cases_root_provenance()`）：
+
+    1. `AIRNAV_CASES_DIR` 环境变量 —— 显式指定，优先（给测试/自检隔离用，
+       与 `agent/render/viewer.py` 的 `AIRNAV_VIEWER_DIR` 同一套办法）；
+    2. `<repo>/cases` —— 真实病例（不入库，见 .gitignore）；
+    3. `<repo>/fixtures/cases` —— **合成夹具**，只在真实病例缺席时兜底。
+
+    ⚠️ 第 3 档是**兜底而不是默认**：它让「全新 clone + 无真实数据」的机器也能跑
+    依赖病例的自检（见 `docs/合成夹具.md`）。但绝不能静默发生 ——
+    调到夹具时 `list_cases` / `inspect_case` 的返回体里会带上
+    `fixture: true` 与来历说明，报告里也会写出来。缺数据 ≠ 可以假装有数据。
+    """
+    override = os.environ.get("AIRNAV_CASES_DIR")
+    if override:
+        return Path(override)
     from .navbridge import NAV_ROOT
 
-    return NAV_ROOT / "cases"
+    real = NAV_ROOT / "cases"
+    if _has_cases(real):
+        return real
+    return FIXTURE_ROOT
+
+
+def _has_cases(root: Path) -> bool:
+    """目录存在且真的装了至少一个病例（空目录不算）。"""
+    if not root.is_dir():
+        return False
+    return any(_looks_like_case(entry) for entry in root.iterdir())
+
+
+def _looks_like_case(entry: Path) -> bool:
+    if not entry.is_dir():
+        return False
+    for candidate in (entry, entry / "stage4_package"):
+        if all((candidate / name).is_file() for name in REQUIRED_FILES):
+            return True
+    return False
+
+
+def cases_root_provenance(root: str | Path | None = None) -> dict[str, Any]:
+    """这份病例数据是哪来的 —— 给报告与工具返回体用。"""
+    override = os.environ.get("AIRNAV_CASES_DIR")
+    resolved = Path(root) if root else cases_root()
+    try:
+        under_fixture = resolved.resolve() == FIXTURE_ROOT.resolve()
+    except OSError:
+        under_fixture = False
+
+    if override:
+        kind = "env"
+    elif under_fixture:
+        kind = "fixture"
+    else:
+        kind = "real"
+    return {
+        "cases_root": str(resolved),
+        "kind": kind,
+        "fixture": kind == "fixture" or under_fixture,
+        "note": {
+            "real": "真实病例目录",
+            "fixture": "**合成夹具**：几何由 agent/scripts/make_fixture_case.py 生成，"
+                       "不含任何患者信息；数字不可用于临床或对外结论",
+            "env": "由 AIRNAV_CASES_DIR 指定",
+        }[kind],
+    }
+
+
+def is_fixture(case_dir: str | Path | None = None) -> bool:
+    """这个病例目录是不是合成夹具。"""
+    if case_dir is None:
+        return cases_root_provenance()["fixture"]
+    try:
+        target = Path(case_dir).resolve()
+    except OSError:
+        return False
+    try:
+        target.relative_to(FIXTURE_ROOT.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def list_local_cases(root: str | Path | None = None) -> list[dict[str, Any]]:

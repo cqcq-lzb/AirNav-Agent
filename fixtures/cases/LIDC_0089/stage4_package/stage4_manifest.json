@@ -1,0 +1,27 @@
+{
+  "case_id": "LIDC_0089",
+  "candidate_count": 4,
+  "note": "合成夹具，几何由 agent/scripts/make_fixture_case.py 生成；不含任何隐私内容，其中的数字不可用于临床结论",
+  "candidates": [
+    {
+      "candidate_id": 1,
+      "source_component_label": 3,
+      "voxel_count": 123
+    },
+    {
+      "candidate_id": 2,
+      "source_component_label": 1,
+      "voxel_count": 81
+    },
+    {
+      "candidate_id": 3,
+      "source_component_label": 4,
+      "voxel_count": 81
+    },
+    {
+      "candidate_id": 4,
+      "source_component_label": 2,
+      "voxel_count": 57
+    }
+  ]
+}
