@@ -6,7 +6,7 @@
 
 实测（gpu41 / qwen2.5:14b）评测用例 E01、E07 就是这么挂的。
 
-这个脚本分四层验：
+这个脚本分五层验：
 
   第 0 层  装配检查     —— Agent 能构造、工具名集合正确
                           （2026-09-17 那一版漏了 `names()` 的括号，
@@ -18,6 +18,29 @@
                           验证纠偏真的发生、留痕正确、答案不是那句承诺；
                           以及催两次还不动时如实记 unresolved_intent
                           而不是假报 answered
+
+另外两层是针对**第三类「没真的调用」**的（2026-09-20 新增）：
+
+  [1b]/[2b] 「把工具调用写成了正文」的召回与精度
+            起因：E07 稳定失败 0/5，而它想传的参数完全正确 ——
+            模型把调用发在了 `content` 里，工具根本没执行，
+            回答却报 `answered`。判据与上面两条**完全不同**：
+            不猜语义，只问「这段文本能不能解析成一次真实工具调用」。
+  [1c]      提取器：识别出来之后要能把它**搬进调用通道** ——
+            数量一个不少、顺序不变、参数原样（不规范化、不改写）。
+  [4b]/[4c] 对应的控制流**[已改为「代为执行」]**（2026-09-22）：
+            这一类不纠偏，循环认出这段 JSON 是完整可执行的调用就直接执行。
+            改这条是因为实测「劝」没用：`temperature=0` 下连发两条纠偏提示，
+            模型把同一段 JSON 原样重复了三次（见 `D:/tmp/e07_probe.py` 的探查结果：
+            4 次里 3 次 `stop_reason=toolcall_as_text`，回答原文又是一段裸 JSON）。
+            判断纪律 #4：**「别许诺」与「让许诺成真」是两种修法** ——
+            选错会修得很干净、但没解决问题。
+            ⚠️ 「把那段 JSON 塞回 content 当上下文」正是自我强化的来源，
+            所以 [4b] 专门钉了一条**结构性**断言：补进去的调用必须走
+            `tool_calls` 通道，回答里不许再出现那段 JSON 原文。
+            [4c] 守的是另一头：检测到是调用、却一个都提取不出来时
+            （防御性分支，正常路径够不到，这里人为打断提取器制造出来），
+            `stop_reason` 必须如实记 `toolcall_as_text`，不得假报 `answered`。
 
 已知的偏保守边界（不算缺陷，但记在这里免得被当成玄学）
 ------------------------------------------------------
@@ -41,7 +64,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from agent.agent_loop import NavAgent, _looks_like_intent_to_act  # noqa: E402
+from agent.agent_loop import (  # noqa: E402
+    NavAgent,
+    _extract_toolcalls,
+    _is_toolcall_as_text,
+    _looks_like_intent_to_act,
+)
 from agent.llm.client import ChatReply, ScriptedClient, ToolCallRequest  # noqa: E402
 from agent.tools import NavSession, build_registry  # noqa: E402
 
@@ -137,6 +165,109 @@ SHOULD_NOT_DETECT = (
 )
 
 
+# ------------------------------------------- 第三类：把工具调用写成了正文（2026-09-20）
+#
+# 与上面两层**分开钉哨兵**，因为它用的是完全不同的判据：
+# 上面两条规则判「语义像不像宣告」，这一条只问「这段文本能不能解析成一次调用」。
+#
+# 起因：E07 稳定失败 0/5（重复 5 次），而它想传的参数完全正确
+# （candidate_id / device_diameter_mm / profile 三项都对）——
+# 纯粹死在输出协议上：模型把调用发在了 content 里，工具根本没执行。
+
+# E07 第 3 步的**原样原文**。它是「整段就是一个裸 JSON」这种形态的代表，
+# 也是规则 A / B 同时漏判的那一类。
+E07_BARE_TOOLCALL = (
+    "```json\n"
+    '{"name": "plan_route", "arguments": {"case_id": "LIDC_0089", '
+    '"candidate_id": 2, "device_diameter_mm": 1.9, "device_margin_mm": 0.2, '
+    '"profile": "gentle_turn"}}\n'
+    "```"
+)
+
+# E07 第 1 步的原文：散文 + 围栏 JSON。**它不能被这一路判成「写成正文」** ——
+# 那一轮模型真的发出了三个调用（inspect_case + 两次 list_nodule_candidates），
+# 正文里那段 JSON 只是它顺手写出来的旁白。循环里靠「本轮没有真实调用」
+# 这个前提挡住；这里同时钉一条纯文本层面的哨兵（残留太长 → 不判）。
+E07_STEP1_WITH_CALLS = (
+    "首先，我需要确认结节的编号。然后根据您的要求，使用 1.9mm 的钳子进行路径规划，"
+    "并选择避开分叉角过大的分支的代价配置。\n\n第一步，确认结节编号：\n"
+    "```json\n"
+    '{"name": "inspect_case", "arguments": {"case_id": "LIDC_0089"}}\n'
+    "```"
+)
+
+# 🔴 真实失败输出（2026-09-22，E07 第 4 次运行的原样原文）。
+#
+# **本条是本轮修的那个漏判。** 引导语 32 个字 —— 旧阈值 12 判它「不是调用」，
+# 于是整段 JSON 被当答案交付、`stop_reason` 记 `answered`。
+# 它比上面所有手工样例都长（6~14 字），这正是问题所在：
+# **阈值是照手工样例校准的，没照真实输出校准。**
+# 留这条哨兵是为了让「尺子照真实分布校准」有可复现的证据，
+# 而不是只在 commit message 里写一句「调大了阈值」。
+E07_RETRY_LEAD_IN = (
+    "使用 1.5mm 的钳子和 `wide_airway` 代价配置重新规划路径：\n"
+    "```json\n"
+    '{"name": "plan_route", "arguments": {"case_id": "LIDC_0089", '
+    '"candidate_id": 2, "profile": "wide_airway", "device_diameter_mm": 1.5, '
+    '"device_margin_mm": 0.2}}\n'
+    "```"
+)
+
+TOOLCALL_AS_TEXT_SHOULD_DETECT = (
+    ("E07 第 3 步原文（围栏 + 裸 JSON）", E07_BARE_TOOLCALL),
+    ("无围栏裸 JSON",
+     '{"name": "plan_route", "arguments": {"case_id": "LIDC_0089", "candidate_id": 2}}'),
+    ("一次两个调用",
+     '[{"name": "inspect_case", "arguments": {"case_id": "LIDC_0089"}}, '
+     '{"name": "rank_candidates", "arguments": {"case_id": "LIDC_0089"}}]'),
+    ("tool_calls 包装形态",
+     '{"tool_calls": [{"function": {"name": "plan_route", '
+     '"arguments": {"case_id": "LIDC_0089", "candidate_id": 2}}}]}'),
+    ("参数写成 parameters",
+     '{"name": "scan_device_fit", "parameters": {"case_id": "LIDC_0089"}}'),
+    # 有散文，但那段散文不是结论，而且规则 A 也认不出「我这就规划」
+    # （将来时标记只认 将/会/要/来/去/准备/开始）。
+    ("过渡语 + 围栏 JSON", "好，我这就规划。\n" + E07_BARE_TOOLCALL),
+    ("先说明再给调用", "先确认一下这个候选的编号。\n" + E07_BARE_TOOLCALL),
+    # 引导语更长的两种写法。**上面两条只有 6 / 12 个字**，
+    # 正是「照手工样例校准」的来源；下面这条才是真实输出的长度（32 字）。
+    ("重试前的一句话 + 调用", "我再用 2.0mm 的器械试一次：\n" + E07_BARE_TOOLCALL),
+    ("🔴 真实失败输出：引导语 32 字 + 调用（旧阈值就漏在这条上）", E07_RETRY_LEAD_IN),
+)
+
+TOOLCALL_AS_TEXT_SHOULD_NOT_DETECT = (
+    ("E07 第 1 步（散文 + JSON，但那一轮真有调用）", E07_STEP1_WITH_CALLS),
+    ("E07 第 2 步（散文 + JSON，残留很长）",
+     "根据提供的信息，右下叶的结节编号为 2，其等效直径为 21.127 mm，"
+     "中心坐标为 (302.395, 188.711, 125.069) mm。\n\n接下来，我将为该结节规划路径，"
+     "使用 1.9mm 的钳子，并选择避开分叉角过大的分支的代价配置。\n" + E07_BARE_TOOLCALL),
+    # 工具**返回体**里也有 name 字段，但没有参数那一层 —— 不能被当成调用
+    ("工具返回体 JSON",
+     '{"ok": true, "name": "LIDC_0089", "candidates": '
+     '[{"client_id": 3, "voxel_count": 2935}]}'),
+    ("viewer 元数据 JSON",
+     '{"ok": true, "viewer_path": "outputs/viewers/viewer_LIDC_0089_c3.html", '
+     '"mesh_step": 1}'),
+    # name 不在注册表里 —— 拼错或幻想出来的工具名不该让我们去催模型
+    ("不存在的工具名", '{"name": "make_coffee", "arguments": {"cups": 2}}'),
+    ("参数类型不对（既不是对象也不是字符串）",
+     '{"name": "plan_route", "arguments": 123}'),
+    # ⚠️ 这一条是**阈值上侧的真正约束**（残留 73 个字）：
+    # 上面「真实失败输出」残留 32，阈值取 50 就夹在这两者之间。
+    # 谁要动 `_TOOLCALL_RESIDUE_MAX`，先看这两个数 —— 只有这一条能挡住
+    # 「把阈值调到 73 以上」，而那会让一段合格结论被当成调用执行掉。
+    ("完整结论里贴了调用示例",
+     "3 号候选路径长度 216.238 mm，最窄直径 5.915 mm，可达性 adjacent。"
+     "本次实际发起的调用形态是 " + E07_BARE_TOOLCALL + "，"
+     "需要说明的是器械外径按 1.9mm 计入余量计算。"),
+    ("E13 选型回答（无 JSON）",
+     "因此，你可以选择外径不超过 3.0 mm 的支气管镜。"
+     "具体型号请参考器械制造商提供的规格表。"),
+    ("E15 复核回答（无 JSON）",
+     "可达性分级为 marginal（明显偏离气道，需人工复核）。"),
+)
+
+
 # ---------------------------------------------------------------- 第 0 层：装配
 
 def check_wiring() -> list[str]:
@@ -197,7 +328,110 @@ def check_detector() -> list[str]:
     return failures
 
 
+def check_toolcall_as_text_detector() -> list[str]:
+    """第三类识别器：把工具调用写成正文的召回 / 精度。"""
+    failures = []
+
+    print("\n[1b] 把工具调用写成正文 —— 必须被识别，不能当答案交付")
+    for label, text in TOOLCALL_AS_TEXT_SHOULD_DETECT:
+        ok = _is_toolcall_as_text(text, TOOL_NAMES)
+        print(f"  {'PASS' if ok else 'FAIL'}  漏判  {label}")
+        if not ok:
+            failures.append(f"漏判：{label} —— 这是没发出去的调用，不能当最终回答")
+
+    print("\n[2b] 结论里出现 JSON 绝不能被误判（误判会打回重做，白花一轮）")
+    for label, text in TOOLCALL_AS_TEXT_SHOULD_NOT_DETECT:
+        ok = not _is_toolcall_as_text(text, TOOL_NAMES)
+        print(f"  {'PASS' if ok else 'FAIL'}  误判  {label}")
+        if not ok:
+            failures.append(
+                f"误判：{label} —— 这不是「写成正文的调用」，催它重做只会越答越差"
+            )
+    return failures
+
+
+def check_toolcall_as_text_extractor() -> list[str]:
+    """识别出来之后，得真的能把它**搬进调用通道**。
+
+    识别只是第一步：`_is_toolcall_as_text` 说「这是调用」，`_extract_toolcalls`
+    负责把它变成可执行的 `ToolCallRequest`。搬运有它自己的坑，而且都是
+    **静默**的 —— 少搬一个就是悄悄丢活儿，搬错顺序就是擅自改模型的意图：
+      - 一次两个调用（`[{inspect_case}, {rank_candidates}]`）必须都搬，
+        而且**顺序不能变**：依赖关系靠顺序才看得懂；
+      - 参数必须**原样**（`_arg_equal` 之外不许做任何规范化）——
+        搬运工替模型改参数，那「代为执行」就变成了「替模型做决定」；
+      - `name` 不在注册表里的、返回体形态的 JSON，一个都不许搬。
+    """
+    failures = []
+
+    # ---- 数量与顺序 ----
+    two_calls = (
+        '[{"name": "inspect_case", "arguments": {"case_id": "LIDC_0089"}}, '
+        '{"name": "rank_candidates", "arguments": {"case_id": "LIDC_0089"}}]'
+    )
+    print("\n[1c] 提取器 —— 一个不少、顺序不变、参数原样")
+    got = _extract_toolcalls(two_calls, TOOL_NAMES)
+    for label, ok, actual in (
+        ("一次两个调用要都搬出来", len(got) == 2, [c.name for c in got]),
+        (
+            "顺序与正文一致（inspect_case 在前）",
+            [c.name for c in got] == ["inspect_case", "rank_candidates"],
+            [c.name for c in got],
+        ),
+    ):
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
+        if not ok:
+            failures.append(f"提取器：{label} 不成立（实际 {actual}）")
+
+    # ---- 参数必须原样 ----
+    only = _extract_toolcalls(E07_BARE_TOOLCALL, TOOL_NAMES)
+    original_args = {
+        "case_id": "LIDC_0089",
+        "candidate_id": 2,
+        "device_diameter_mm": 1.9,
+        "device_margin_mm": 0.2,
+        "profile": "gentle_turn",
+    }
+    checks = (
+        ("只搬出一个调用", len(only) == 1, len(only)),
+        ("工具名是 plan_route", bool(only) and only[0].name == "plan_route",
+         only[0].name if only else None),
+        # 逐字段比对，不看字符串：模型写了 1.9 就不能变成 1.90 或 "1.9"
+        ("五个参数逐字段原样（含 profile=gentle_turn）",
+         bool(only) and all(only[0].parsed().get(k) == v
+                            for k, v in original_args.items()),
+         only[0].parsed() if only else None),
+        ("id 带 recovered_ 前缀（trace 里一眼看得出不是走调用通道来的）",
+         bool(only) and only[0].id.startswith("recovered_"),
+         only[0].id if only else None),
+    )
+    for label, ok, actual in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
+        if not ok:
+            failures.append(f"提取器：{label} 不成立（实际 {actual}）")
+
+    # ---- 反向：不该搬的一个都别搬 ----
+    # 这些正是 [2b] 里那些「不能被识别」的样本。识别层挡住的，提取层也必须挡住 ——
+    # 提取器入口自带 `_is_toolcall_as_text` 守卫，所以两层不会是两套判据。
+    #
+    # 特别要挡住「完整结论里贴了调用示例」这条：那段 JSON 单看完全合法，
+    # 只有在**上下文**里才看得出它是举例而不是调用。这条哨兵就是为它设的 ——
+    # 如果哪天有人把守卫去掉（觉得「调用方已经查过了」），这里立刻会红。
+    print("\n     反向：识别层挡住的形态，提取层一个字都不许搬")
+    for label, text in TOOLCALL_AS_TEXT_SHOULD_NOT_DETECT:
+        got_bad = _extract_toolcalls(text, TOOL_NAMES)
+        names = [call.name for call in got_bad]
+        ok = not names
+        print(f"  {'PASS' if ok else 'FAIL'}  不该搬  {label}（实际 {names}）")
+        if not ok:
+            failures.append(
+                f"提取器：{label} 被搬出了 {names} —— 不该执行的调用被执行了"
+            )
+    return failures
+
+
 # ---------------------------------------------------------------- 第 3 层：控制流
+
 
 def _make_agent(replies, corrections: int = 2, verbose: bool = False) -> NavAgent:
     return NavAgent(
@@ -279,6 +513,189 @@ def check_gives_up_honestly() -> list[str]:
         print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
         if not ok:
             failures.append(f"催不动路径：{label} 不成立（实际 {actual}）")
+    return failures
+
+
+def check_toolcall_as_text_recovered() -> list[str]:
+    """E07 的复现（2026-09-22 改版）：把调用写成正文 → **代为执行** → 正常收尾。
+
+    脚本回放用的是 E07 的**原样原文**：第 1 步那句「接下来，我将…」（散文宣告，
+    走纠偏 —— 那段文字里没有可执行的调用，只能劝），第 3 步那段裸 JSON
+    （走代为执行 —— 调用是完整的，劝它重发三遍都原样重复）。
+
+    这里钉住四处，缺一处这个机制就会退化成「看起来修好了」：
+      1. **没有为写成正文再纠偏一次**（`intent_corrections` 只该有散文宣告那 1 次）；
+      2. 那段 JSON 里的调用**真的被执行了**（调用链里有 plan_route，且
+         `recovered_toolcalls == 1`）—— 这是「让许诺成真」与「只是不报错」的区别；
+      3. **留痕如实**：`step.note` 写明「已代为执行」，否则报告里看起来像一次到位；
+      4. **不许把那段 JSON 塞回 content** —— 那正是自我强化的来源。
+         补进去的调用必须走 `tool_calls` 通道（结构性断言，不是措辞检查）。
+    """
+    failures = []
+    print("\n[4b] 把调用写成正文 —— 必须**代为执行**，并且不许把 JSON 塞回正文（E07 复现）")
+    agent = _make_agent(
+        [
+            ScriptedClient.say(INTENT),
+            ScriptedClient.say(E07_BARE_TOOLCALL),
+            ScriptedClient.say(REAL_ANSWER),
+        ]
+    )
+    run = agent.run("规划一条尽量少走急弯的路，器械用 1.9mm")
+
+    notes = [step.note for step in run.steps if step.note]
+    called = [call["name"] for step in run.steps for call in step.tool_calls]
+    sent = agent.client.calls
+
+    # 「没走纠偏」要查**注入的提示**，不能查 step.note 的文案 ——
+    # 恢复留痕本身就写着「把工具调用写成了正文，已代为执行 1 个」，
+    # 拿这个词去搜 note 会把正确的行为判成走了纠偏（第一版就是这么写错的）。
+    # 纠偏提示是作为 **user 消息**注入的，按角色 + 文案查才是对的形状。
+    nagged = any(
+        "工具调用写成了正文" in str(item.get("content", ""))
+        for message in sent
+        for item in message
+        if isinstance(item, dict) and item.get("role") == "user"
+    )
+
+    checks = (
+        (
+            "散文宣告那一次仍走纠偏（intent_corrections == 1）",
+            run.intent_corrections == 1,
+            run.intent_corrections,
+        ),
+        ("写成正文的那次**没有**注入纠偏提示", not nagged, nagged),
+        ("那段 JSON 里的调用真的被执行了", called == ["plan_route"], called),
+        ("recovered_toolcalls 记了 1", run.recovered_toolcalls == 1,
+         run.recovered_toolcalls),
+        (
+            "留痕写明「已代为执行」",
+            any("已代为执行" in note for note in notes),
+            notes,
+        ),
+        ("最终答案是结论而不是那段 JSON", run.answer == REAL_ANSWER, run.answer[:40]),
+        ("stop_reason 是 answered", run.stop_reason == "answered", run.stop_reason),
+    )
+    for label, ok, actual in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
+        if not ok:
+            failures.append(f"代为执行路径：{label} 不成立（实际 {actual}）")
+
+    # ---- 结构性断言：那段 JSON 绝不能以 content 形态进上下文 ----
+    #
+    # 修复前正是 `messages.append({"role": "assistant", "content": text})` 把它塞回去，
+    # 于是模型的下一轮接着自己的 JSON 往下写，原样重复了三次。
+    # 这里不看措辞、只看形状：assistant 消息的 content 里不许再出现那段调用 JSON。
+    # 这里不看措辞、只看形状：assistant 消息的 content 里不许再出现那段调用 JSON。
+    leaked = [
+        item
+        for message in sent
+        for item in message
+        if isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and '"name"' in str(item.get("content", ""))
+        and "plan_route" in str(item.get("content", ""))
+    ]
+    ok = not leaked
+    print(f"  {'PASS' if ok else 'FAIL'}  那段调用 JSON 没有以 content 形态回到上下文"
+          f"（泄漏 {len(leaked)} 处）")
+    if not ok:
+        failures.append(
+            "代为执行路径：调用 JSON 被当成 assistant 的 content 塞回上下文 —— "
+            "这正是模型照抄自己的 JSON、连发三次的原因"
+        )
+
+    # 反面：补进去的那次调用**必须**在 tool_calls 通道里（否则上面的「没泄漏」
+    # 可以靠「干脆不进上下文」作弊通过）
+    carried = [
+        call
+        for message in sent
+        for item in message
+        if isinstance(item, dict) and item.get("role") == "assistant"
+        for call in (item.get("tool_calls") or [])
+        if (call.get("function") or {}).get("name") == "plan_route"
+    ]
+    ok = bool(carried)
+    print(f"  {'PASS' if ok else 'FAIL'}  补进去的调用确实在 tool_calls 通道里"
+          f"（{len(carried)} 条）")
+    if not ok:
+        failures.append("代为执行路径：上下文里找不到那次调用 —— 执行了却没告诉模型")
+    return failures
+
+
+def check_toolcall_as_text_gives_up_honestly() -> list[str]:
+    """检测到是调用、却一个都提取不出来时：如实记 `toolcall_as_text`，不得假报 `answered`。
+
+    ⚠️ **这条分支在正常代码路径下够不到**（`_is_toolcall_as_text` 成立就意味着
+    至少有一个 block 是合法调用），所以这里人为把提取器打断来制造这个退化 ——
+    判断纪律 #8：**不测就等于没有**，够不到的兜底等于没写。
+    它守的是最坏情况：宁可报告「没做完」，也不要交给医生一段他自己看不懂的 JSON。
+    """
+    failures = []
+    print("\n[4c] 提取器被打断（防御分支）—— 必须如实记账，不得假报 answered")
+
+    import agent.agent_loop as loop_module
+
+    original = loop_module._extract_toolcalls
+    loop_module._extract_toolcalls = lambda text, names: []  # type: ignore[assignment]
+    try:
+        run = _make_agent([ScriptedClient.say(E07_BARE_TOOLCALL)] * 4).run("随便问问")
+    finally:
+        loop_module._extract_toolcalls = original  # type: ignore[assignment]
+
+    checks = (
+        ("纠偏次数封顶在 2", run.intent_corrections == 2, run.intent_corrections),
+        (
+            "stop_reason 是 toolcall_as_text",
+            run.stop_reason == "toolcall_as_text",
+            run.stop_reason,
+        ),
+        ("没有假报 answered", run.stop_reason != "answered", run.stop_reason),
+    )
+    for label, ok, actual in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
+        if not ok:
+            failures.append(f"提取失败兜底：{label} 不成立（实际 {actual}）")
+    return failures
+
+
+def check_correction_budget_refills() -> list[str]:
+    """发出调用就还额度 —— **哪怕那次调用失败了**。
+
+    两条都来自实测（2026-09-20，E07）：
+      · 第 2、3 步各纠偏一次，第 4 步真的发出了 plan_route（说明已被拉回调用通道）；
+      · 但那次返回 ok=false（器械不可行），模型想换更细的器械重试 —— 写在第 5 步 ——
+        此时额度若已用光，它又会把调用写成正文交出去，仍然 0/5。
+    所以重置的判据必须是「有没有发出调用」，**不是「调用成不成功」**：
+    纠偏治的是输出通道，调用失败归工具失败自愈那套机制管。
+    """
+    failures = []
+    print("\n[4d] 纠偏额度必须按进展重置（发出调用就还，失败也算）")
+    run = _make_agent(
+        [
+            ScriptedClient.say(INTENT),  # 纠偏 1
+            ScriptedClient.say(INTENT),  # 纠偏 2 —— 两次额度用光
+            # 一次**注定失败**的调用（候选越界）：它仍然算「用上了调用通道」
+            ScriptedClient.tool("plan_route", case_id=CASE, candidate_id=99),
+            ScriptedClient.say(INTENT),  # 必须还能纠偏（累计第 3 次）
+            ScriptedClient.say(REAL_ANSWER),
+        ]
+    ).run(f"{CASE} 给完整规划结论")
+
+    notes = [step.note for step in run.steps if step.note]
+    checks = (
+        (
+            "纠偏累计超过上限（2），证明失败调用也还了额度",
+            run.intent_corrections == 3,
+            run.intent_corrections,
+        ),
+        ("最终答案是结论，不是那句承诺", run.answer == REAL_ANSWER, run.answer[:40]),
+        ("stop_reason 是 answered", run.stop_reason == "answered", run.stop_reason),
+    )
+    for label, ok, actual in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}（实际 {actual}）")
+        if not ok:
+            failures.append(f"额度重置：{label} 不成立（实际 {actual}）")
+    print(f"        留痕：{notes}")
     return failures
 
 
@@ -411,8 +828,13 @@ def main() -> int:
 
     failures = check_wiring()
     failures += check_detector()
+    failures += check_toolcall_as_text_detector()
+    failures += check_toolcall_as_text_extractor()
     failures += check_correction_happens()
     failures += check_gives_up_honestly()
+    failures += check_toolcall_as_text_recovered()
+    failures += check_toolcall_as_text_gives_up_honestly()
+    failures += check_correction_budget_refills()
     failures += check_normal_run_untouched()
     failures += check_dependency_deferral()
 
@@ -423,9 +845,13 @@ def main() -> int:
             print(f"  - {item}")
         return 1
     print(
-        f"通过：识别器召回 {len(SHOULD_DETECT)}/{len(SHOULD_DETECT)}、"
-        f"精度 {len(SHOULD_NOT_DETECT)}/{len(SHOULD_NOT_DETECT)}，"
-        "纠偏 / 如实记账 / 不干扰正常轨迹 / 依赖延后四条控制流全部符合预期"
+        f"通过：宣告类识别 {len(SHOULD_DETECT)}/{len(SHOULD_DETECT)}、"
+        f"宣告类精度 {len(SHOULD_NOT_DETECT)}/{len(SHOULD_NOT_DETECT)}、"
+        f"写成正文识别 {len(TOOLCALL_AS_TEXT_SHOULD_DETECT)}/"
+        f"{len(TOOLCALL_AS_TEXT_SHOULD_DETECT)}、"
+        f"写成正文精度 {len(TOOLCALL_AS_TEXT_SHOULD_NOT_DETECT)}/"
+        f"{len(TOOLCALL_AS_TEXT_SHOULD_NOT_DETECT)}（提取层同样一个不搬），"
+        "代为执行 / 如实记账 / 不干扰正常轨迹 / 依赖延后全部符合预期"
     )
     return 0
 

@@ -113,6 +113,7 @@
   .tl .f{color:var(--bad)}
   .tl .d{color:var(--warn)}
   .tl .c{color:#5b3f96}
+  .tl .r{color:#5b3f96}
 
   dialog#vw{width:min(1200px,94vw);height:min(88vh,900px);border:0;border-radius:12px;padding:0;
     background:var(--panel);box-shadow:0 12px 40px rgba(20,30,45,.28)}
@@ -581,6 +582,21 @@
           break;
         }
 
+        // 模型把工具调用写成了正文（Qwen 原生格式漏进 content，见 agent_loop 规则 C）。
+        // 这一类**不纠偏**：循环认出这段 JSON 是完整可执行的调用，直接代为执行。
+        // 界面上必须显出来 —— 不然「代执行才跑通」和「一次到位」看起来一模一样。
+        case "recovered": {
+          ensureStep(d.step);
+          const names = d.names || [];
+          const n = document.createElement("div");
+          n.className = "note corr";
+          n.textContent = d.note || ("把工具调用写成了正文，已代为执行：" + names.join(", "));
+          box.appendChild(n);
+          traceRow("r", d.step, "代为执行 " + names.join(","));
+          scrollDown();
+          break;
+        }
+
         case "artifacts":
           renderArtifacts(d.items);
           break;
@@ -591,7 +607,8 @@
           s.className = "stats";
           s.innerHTML = "<b>" + d.steps + "</b> 步 · <b>" + d.tool_calls + "</b> 次工具调用 · <b>" +
             d.elapsed_s + "s</b> · " + esc(d.stop_reason) +
-            (d.intent_corrections ? " · 纠偏 " + d.intent_corrections : "");
+            (d.intent_corrections ? " · 纠偏 " + d.intent_corrections : "") +
+            (d.recovered_toolcalls ? " · 代为执行 " + d.recovered_toolcalls : "");
           box.appendChild(s);
           scrollDown();
           break;

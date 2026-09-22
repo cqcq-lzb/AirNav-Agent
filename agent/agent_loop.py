@@ -30,16 +30,40 @@
    所以精度优先于召回，并且每一条误判都必须在
    `agent/scripts/verify_agent_loop.py` 里留下哨兵。
 
-   目前的判定分两路，**每一路都要求「这是 Agent 在说自己的下一步」**：
+   目前的判定分三路，**每一路都要求「这是 Agent 在说自己的下一步」**：
      - 规则 A：第一人称 + 将来时标记 + 动作动词。
        「将/会/要/准备」是强标记（配 10 字窗口）；
        「需要/想/得」是弱标记（中文里常表示「必须」，配 3 字紧窗口）。
      - 规则 B：动宾结构 + **真实存在的**工具名。
-   两路都要再过两道闸：
+     - 规则 C（`_is_toolcall_as_text`，2026-09-20 新增）：
+       **整段就是一个可解析的工具调用 JSON**。
+       这一类不是措辞问题，是**输出通道**问题 —— 模型把调用发在了 `content`
+       里而不是 `tool_calls` 里，所以工具根本没执行。E07 实测稳定失败 0/5，
+       而它想传的参数完全正确（candidate_id / device / profile 全对）。
+       规则 A / B 对它全部漏判（既没有将来时，也没有「调用 + 工具名」的动宾结构）。
+       ⚠️ 规则 C **只在「本轮没有任何真实工具调用」时启用** —— 实测 E07 第 1 步
+       的正文里也带着围栏 JSON，但那一轮真的发出了三个调用。
+
+       **处置与 A / B 不同：这一类不纠偏，直接代为执行。**（2026-09-20 实测纠偏无效）
+       `{"name": …, "arguments": …}` 是 Qwen2.5 的**原生工具调用格式**
+       （`<tool_call>…</tool_call>`），也是 Ollama 的 OpenAI 兼容层没解析掉时
+       会漏进 `content` 的形态。也就是说模型不是「没做完」，而是
+       「做完了、但放错了地方」—— 没有可劝的余地。实测 `temperature=0` 下
+       注入两条纠偏提示，模型原样重复了同一段 JSON 三次（见
+       `docs/评测区分度_同义改写实验.md`）。既然这段 JSON 里报的调用完整、
+       工具名真实存在、参数能过注册表校验，就**把它当真的调用执行**
+       （`_extract_toolcalls`），而不是当答案交出去，也不是反复去劝。
+       留痕要如实：`step.note` 写明「已代为执行 N 个」，`run.recovered_toolcalls`
+       记累计次数 —— 这是「有多少活儿是替模型擦屁股完成的」的度量。
+       判据见判断纪律 #4：**「别许诺」与「让许诺成真」是两种修法**，
+       选错会修得很干净、但没解决问题。
+     A / B 两路都要再过两道闸：
      - `_is_conditional_offer` —— 「如果您需要…我将…」是说给用户的提议，放过。
        （但要求条件词与第二人称同时出现：「如果直接规划不行，我将改用…」
         仍是真宣告，不能放过。）
      - `_addresses_user` —— 「请/您/您可以/建议 + 调用 X」是在指挥用户，放过。
+     规则 C 不需要这两道闸：它判的是「这段文本能不能解析成一次调用」，
+     与说给谁听无关，也不含任何语义猜测。
 4. **工具失败自愈**：工具的异常被注册表兜住并转成 {"ok": false, "error": ...}，
    模型有机会读到错误、改参数重试。这是 Agent 比单次调用强的地方。
 5. **步进事件回调**（`on_event`，默认 None）：把每一步发生的事推给外部观察者。
@@ -56,7 +80,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from .llm.client import ChatReply, LLMError, OpenAICompatClient, ScriptedClient
+from .llm.client import (
+    ChatReply,
+    LLMError,
+    OpenAICompatClient,
+    ScriptedClient,
+    ToolCallRequest,
+)
 from .tools.registry import ToolRegistry
 from .tools.session import NavSession
 
@@ -220,6 +250,24 @@ _INTENT_CORRECTION = (
     "不要再输出任何计划或意图描述。"
 )
 
+# 纠偏提示（第三类的**兜底**分支：把工具调用写成了正文，但提取不出可执行的调用）。
+#
+# ⚠️ 这条现在只在「检测到是工具调用、却一个都提取不出来」时用得上 ——
+# 正常情况下规则 C 走的是**代为执行**（见模块 docstring「规则 C」与
+# `_extract_toolcalls`），根本不进纠偏。理论上这两件事不该脱节
+# （`_is_toolcall_as_text` 成立就意味着至少有一个 block 是合法调用），
+# 所以这条兜底是**防御性**的：宁可留一条能劝就劝的路径，
+# 也不要让一段既不是结论、又没执行的东西被当成答案交出去。
+# 哨兵见 `verify_agent_loop.py` 的 `[4c]`（人为让提取返回空来制造这个退化）。
+_TOOLCALL_TEXT_CORRECTION = (
+    "你上一条消息把**工具调用写成了正文**（一整段 ```json {\"name\": …} ``` 代码块），"
+    "这不是一次真正的调用 —— 它在 `content` 里，不在调用通道里，**所以工具并没有执行**，"
+    "任务也还没完成。\n"
+    "请二选一：\n"
+    "1) 如果还需要数据 —— **通过调用通道真的发起这次调用**，不要把 JSON 写进回答正文；\n"
+    "2) 如果已经掌握足够信息 —— 直接给出完整的最终结论，不要再输出任何 JSON。"
+)
+
 # 「我要调用某个工具」的第三种写法：动宾结构 + 真实工具名。
 #
 # ⚠️ 必须排除过去时。已完成的调用在回答里很常见：
@@ -272,6 +320,61 @@ _CONDITIONAL_MARKERS = (
 )
 _USER_PRONOUNS = ("您", "你")
 
+# ---------------------------------------------------------------- 第三类「没真的调用」
+#
+# 实测（2026-09-20，E07）模型输出的**整段**就是
+#
+#     ```json
+#     {"name": "plan_route", "arguments": {"case_id": "LIDC_0089",
+#      "candidate_id": 2, "device_diameter_mm": 1.9, "profile": "gentle_turn"}}
+#     ```
+#
+# 没有散文、没有反引号包住的工具名 —— 规则 A（要第一人称将来时）与规则 B
+# （要「调用/执行 + 工具名」）**全部漏判**，于是这段 JSON 被当成最终回答
+# 交付给医生，`stop_reason` 还记成 `answered`。
+#
+# 而它想传的参数其实**完全正确**（候选编号、器械外径、代价档位都对），
+# 纯粹死在输出协议上。所以「分数掉了」未必等于「模型变笨」。
+#
+# ⚠️ 为什么不去放宽规则 A / B 的召回：那两个有误判前科（E03 被催后编出
+# 不存在的余量 2.715mm、E09 被催后丢掉带引用和公式的合格回答，见上文）。
+# 放宽召回就是重蹈覆辙。这一路用的是**完全不同的判据** —— 不猜语义，
+# 只问「这段文本能不能解析成一次真实的工具调用」。
+# 给医生的最终结论不可能是裸 JSON，所以这条判据不会误伤；
+# 它也不要求任何散文线索，所以不会漏判。
+#
+# 🔴 只在**本轮没有任何真实工具调用**时启用（见循环里 `if not reply.wants_tools`）。
+# 实测 E07 第 1 步的正文里同样带着一段围栏 JSON，但那一轮模型**真的**发出了
+# 三个调用 —— 若不加这个前提，那些调用会被误判成「没做完」而被打回去重做。
+_TOOLCALL_FENCE_RE = re.compile(r"```[A-Za-z0-9_+-]*\s*([\s\S]*?)```")
+
+# 去掉 JSON 与围栏之后，剩下的「非标点字符」不超过这个数，就认为这条消息
+# 本身就是一次（写成正文的）工具调用，而不是一段回答。
+#
+# ⚠️ 这个数**从 12 改到 50**（2026-09-22），原因值得记下来 ——
+# 12 是照着手工写的样例校准的，不是照着**真实输出**校准的：
+#
+#   必须判成调用（残留字符数）      绝不能判成调用（残留字符数）
+#     0  纯裸调用                    73  合格结论里贴了调用示例
+#     0  纯围栏调用                 102  E07 第 2 步（散文 + 调用）
+#     6  「好，我这就规划。」        36  工具返回体       ← 这两条是被
+#    12  「先确认一下这个候选的编号。」 37  不存在的工具名   ← `_is_toolcall_payload`
+#    14  「我再用 2.0mm 的器械试一次：」                       挡掉的，与阈值无关
+#    32  **真实失败输出**（见下）
+#
+# 漏判的那次真实输出是：
+#     「使用 1.5mm 的钳子和 `wide_airway` 代价配置重新规划路径：」+ 围栏 JSON
+# 引导语 32 个字 > 12，于是识别器判「这不是调用」，把一整段 JSON 当答案交付、
+# `stop_reason` 还记 `answered`。**手工样例（6~14 字）比真实输出（32 字）短得多，
+# 阈值就落在真实分布之外了** —— 尺子要照真实输出校准，这条教训是通用的。
+#
+# 50 落在 32 与 73 之间：对最大真阳性留 1.56 倍余量，对最小真阴性留 1.46 倍。
+# 为什么不是「刚好 33」：再出现一条更长的引导语就又会漏判，而两侧余量对等
+# 才能让「下次该往哪边挪」有据可依。
+# 重新校准用 `D:/tmp/residue_scale.py`（打印两侧分布），改完两侧哨兵都要过。
+# 哨兵见 `agent/scripts/verify_agent_loop.py` 的第 [1b] / [2b] 层。
+_TOOLCALL_RESIDUE_MAX = 50
+
 
 def _is_conditional_offer(text: str, position: int) -> bool:
     """命中点所在的那一句，是不是「如果您需要…我将…」式的、说给用户的提议。"""
@@ -323,6 +426,170 @@ def _looks_like_intent_to_act(text: str, tool_names: set[str]) -> bool:
     return False
 
 
+def _brace_blocks(text: str) -> list[str]:
+    """切出文本里所有**顶层**的 `{...}` 片段（按引号与转义正确配平）。
+
+    不用正则：`\\{[\\s\\S]*\\}` 是贪婪的，会把两段 JSON 和夹在中间的散文一起
+    吞进去，于是「残留有多少字」就算不准 —— 而残留量正是这条判据的唯一阈值。
+    """
+    blocks: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}":
+            if depth:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    blocks.append(text[start : index + 1])
+                    start = -1
+    return blocks
+
+
+def _is_toolcall_payload(candidate: str, tool_names: set[str]) -> bool:
+    """这段文本本身是不是一次工具调用？name 必须是**注册表里真实存在**的工具。
+
+    要求 name 真实存在，是为了不误伤「回答里贴了一段示例 JSON」这种写法；
+    要求同时带 arguments/parameters，是为了不误伤工具**返回体**（那些 JSON
+    里也有 name 字段，但没有参数那一层）。
+
+    兼容三种常见形态：
+      {"name": ..., "arguments": {...}}
+      {"name": ..., "parameters": {...}}
+      {"tool_calls": [{"function": {"name": ..., "arguments": ...}}]}
+    """
+    try:
+        payload = json.loads(candidate.strip())
+    except (TypeError, ValueError):
+        return False
+
+    items: Any = payload
+    if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
+        items = payload["tool_calls"]
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list) or not items:
+        return False
+
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        function = item.get("function")
+        if isinstance(function, dict):
+            item = function
+        name = item.get("name")
+        if not isinstance(name, str) or name not in tool_names:
+            return False
+        if not isinstance(item.get("arguments", item.get("parameters")), (dict, str)):
+            return False
+    return True
+
+
+def _is_toolcall_as_text(text: str, tool_names: set[str]) -> bool:
+    """整条消息就是一次（被写成正文的）工具调用 —— 它不是给医生的最终回答。
+
+    判定分两级，任何一级成立即可：
+      1. 整段（剥掉 ``` 围栏后）就是一个可解析的工具调用；
+      2. 里面**确实**含一个工具调用 JSON，且去掉所有 JSON 与围栏之后，
+         剩下的够不上一段话（非标点字符 ≤ `_TOOLCALL_RESIDUE_MAX`）。
+
+    第 2 级是为了覆盖「好，我这就规划。 + JSON」这种过渡语开头的写法 ——
+    它有散文，但那段散文不是结论，而且规则 A 也认不出「我这就规划」。
+    """
+    if not text or not tool_names:
+        return False
+
+    unwrapped = _TOOLCALL_FENCE_RE.sub(lambda match: match.group(1), text)
+    if _is_toolcall_payload(unwrapped, tool_names):
+        return True
+
+    residue = unwrapped
+    found = False
+    for block in _brace_blocks(unwrapped):
+        if _is_toolcall_payload(block, tool_names):
+            found = True
+        residue = residue.replace(block, " ")
+    if not found:
+        return False
+
+    residue = _TOOLCALL_FENCE_RE.sub(" ", residue)
+    prose = re.sub(r"[\s，。；、：！？~～—…\-—+*#>`'\"（）()\[\]]+", "", residue)
+    return len(prose) <= _TOOLCALL_RESIDUE_MAX
+
+
+def _extract_toolcalls(text: str, tool_names: set[str]) -> list[ToolCallRequest]:
+    """把「被写成正文的」工具调用提取成真的 `ToolCallRequest`，交给执行通道。
+
+    ⚠️ **入口自带 `_is_toolcall_as_text` 守卫，这是刻意的。**
+    单独看「这段 JSON 能不能解析成调用」是不够的 ——
+    一段合格的最终结论里如果贴了调用示例（
+    「本次实际发起的调用形态是 ```{"name": "plan_route", …}```，需要说明的是…」），
+    单看那一段 JSON 也完全合法。区别在**上下文**：正文的主体是结论，不是调用。
+    那个判断属于 `_is_toolcall_as_text`（它数了「去掉 JSON 之后还剩多少字」）。
+    守卫放在这里而不是只放在调用方，是因为**约定挡不住未来的误用**：
+    少写一次前置检查，结果就是「把示例当调用执行」，而且静默。
+    代价是重复跑一遍识别（毫秒级），换「不可能用错」，值。
+
+    提取的是**全部**顶层 `{…}` 块，不只是第一段：模型把两个调用写在一起
+    （`[{inspect_case}, {rank_candidates}]`）时，只执行第一个等于偷偷丢活儿。
+    执行顺序**按它们在正文里出现的先后**，与模型写下的顺序一致；
+    依赖关系（`plan_route` 依赖 `candidate_id`）仍由循环里原有的
+    prerequisites 机制处理，这里不重复判断 —— 两处都管会互相打架。
+
+    `id` 前缀用 `recovered_`：一眼能从 trace 里看出这次调用不是走
+    `tool_calls` 通道来的。参数按原样重新序列化，不做规范化 ——
+    模型写了什么就执行什么，否则「代为执行」就变成了「替模型改参数」。
+    """
+    if not _is_toolcall_as_text(text, tool_names):
+        return []
+
+    unwrapped = _TOOLCALL_FENCE_RE.sub(lambda match: match.group(1), text)
+    calls: list[ToolCallRequest] = []
+    for block in _brace_blocks(unwrapped):
+        if not _is_toolcall_payload(block, tool_names):
+            continue
+        try:
+            payload = json.loads(block.strip())
+        except (TypeError, ValueError):
+            continue
+        items: Any = payload
+        if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
+            items = payload["tool_calls"]
+        if isinstance(items, dict):
+            items = [items]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if isinstance(function, dict):
+                item = function
+            raw = item.get("arguments", item.get("parameters"))
+            calls.append(
+                ToolCallRequest(
+                    id=f"recovered_{len(calls)}_{item['name']}",
+                    name=item["name"],
+                    arguments=raw if isinstance(raw, str)
+                    else json.dumps(raw or {}, ensure_ascii=False),
+                )
+            )
+    return calls
+
+
 @dataclass
 class AgentStep:
     """循环中的一步。"""
@@ -367,6 +634,12 @@ class AgentRun:
     # 「宣告动作但没真的调用」被纠偏了几次。>0 说明模型出现过这种行为，
     # 留痕是为了能区分「一次就答对」和「催了才答对」。
     intent_corrections: int = 0
+    # 「把工具调用写成了正文」被**代为执行**了几个调用。
+    #
+    # 与 `intent_corrections` 分开记，因为它们是两种东西：前者是「催了几次」，
+    # 后者是「替模型把 N 个调用补进了调用通道」。E07 从 0/5 到 5/5 靠的就是这条，
+    # 不记的话报告里会显得「一次到位」，把擦屁股的活儿藏掉了。
+    recovered_toolcalls: int = 0
 
     @property
     def tool_call_count(self) -> int:
@@ -384,6 +657,7 @@ class AgentRun:
             "steps": len(self.steps),
             "tool_calls": self.tool_call_count,
             "intent_corrections": self.intent_corrections,
+            "recovered_toolcalls": self.recovered_toolcalls,
             "elapsed_s": round(self.elapsed_s, 2),
             "usage": self.usage,
             "backend": self.backend,
@@ -507,62 +781,141 @@ class NavAgent:
             if not reply.wants_tools:
                 text = reply.content.strip()
                 if text:
-                    # 先分辨这是「最终回答」还是「只在宣告下一步动作」。
-                    # 后者绝不能当答案交出去 —— 医生拿到的会是一句承诺。
+                    # 先分辨这是「最终回答」还是「根本没做完」。
+                    # 两类没做完都不能当答案交出去 —— 医生拿到的会是一句承诺，
+                    # 或者一段他自己看不懂的 JSON。
                     announcing = _looks_like_intent_to_act(text, self._tool_names)
-                    if announcing and self.intent_corrections < self.max_intent_corrections:
-                        self.intent_corrections += 1
-                        run.intent_corrections = self.intent_corrections
+                    # 只在「本轮没有任何真实调用」时才查第三类。E07 第 1 步的正文里
+                    # 也带着一段围栏 JSON，但那一轮真的发出了三个调用 —— 不加这个
+                    # 前提，那些调用会被误判成没做完而被打回去重做。
+                    as_text = not announcing and _is_toolcall_as_text(
+                        text, self._tool_names
+                    )
+                    kind = "intent" if announcing else "toolcall_text" if as_text else ""
+
+                    # ---------------------------------------------- 代为执行
+                    # 规则 C 的**主路径**（不是纠偏）。这一段 JSON 里报的调用是完整的、
+                    # 工具名真实存在、参数能过注册表校验，只是发错了通道 ——
+                    # 那就按它说的执行，别去劝，更别把 JSON 当结论交给医生。
+                    # 「劝」这条路已经用实测排除：temperature=0 下连发两条纠偏提示，
+                    # 模型把同一段 JSON 原样重复了三次（2026-09-20，E07 探查）。
+                    recovered = (
+                        _extract_toolcalls(text, self._tool_names) if as_text else []
+                    )
+                    if recovered:
+                        run.recovered_toolcalls += len(recovered)
                         step.note = (
-                            f"第 {self.intent_corrections} 次「宣告动作但未调用工具」，"
-                            "已注入纠偏提示"
+                            f"把工具调用写成了正文，已代为执行 {len(recovered)} 个"
+                            f"（{'、'.join(call.name for call in recovered)}）"
+                        )
+                        if self.verbose:
+                            print(f"  [step {step_index}] ** {step.note}")
+                        self._emit(
+                            {
+                                "type": "recovered",
+                                "step": step_index,
+                                "names": [call.name for call in recovered],
+                                "note": step.note,
+                            }
+                        )
+                        # 补成一次**合规的**调用轮次：下面执行完会依次追加 role=tool 的
+                        # 回应，那些 tool_call_id 必须先有主，否则下一轮请求不合法。
+                        # 注意这里走的是 `tool_calls` 通道 —— 与「把那段 JSON 塞回
+                        # content 当上下文」是两回事：后者会让模型照着自己那段 JSON
+                        # 继续写下去（正是连发三次的原因）。
+                        reply = ChatReply(
+                            content="",
+                            tool_calls=recovered,
+                            usage=reply.usage,
+                            finish_reason=reply.finish_reason,
+                            raw=reply.raw,
+                        )
+                        # 不 continue —— 落到下面的执行块，与真实调用走同一条路
+                    elif kind and self.intent_corrections < self.max_intent_corrections:
+                        self.intent_corrections += 1
+                        # run 上记的是**累计**次数（报告要的是「一共被催了几次」），
+                        # self 上的是**本轮额度**（可被进展重置，见循环末尾）
+                        run.intent_corrections += 1
+                        reason = (
+                            "宣告动作但未调用工具"
+                            if kind == "intent"
+                            else "把工具调用写成了正文（但提取不出可执行的调用）"
+                        )
+                        step.note = (
+                            f"第 {run.intent_corrections} 次「{reason}」，已注入纠偏提示"
                         )
                         if self.verbose:
                             print(f"  [step {step_index}] !! {step.note}")
                         self._emit(
                             {
                                 "type": "correction",
-                                "kind": "intent",
+                                "kind": kind,
                                 "step": step_index,
-                                "count": self.intent_corrections,
+                                "count": run.intent_corrections,
                                 "note": step.note,
                             }
                         )
-                        # 把它自己的话放回上下文，模型才知道我们在纠正什么
+                        # 把它自己的话放回上下文，模型才知道我们在纠正什么。
+                        # ⚠️ 只有「散文宣告」这一路可以这么做 —— 它那段话里没有
+                        # 完整 JSON，照抄不会自我强化。规则 C 走的是上面那条路。
                         messages.append({"role": "assistant", "content": text})
-                        messages.append({"role": "user", "content": _INTENT_CORRECTION})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    _INTENT_CORRECTION
+                                    if kind == "intent"
+                                    else _TOOLCALL_TEXT_CORRECTION
+                                ),
+                            }
+                        )
                         run.steps.append(step)
                         continue
+                    else:
+                        run.answer = text
+                        # 都没救成：如实记下是哪一种，不要假报 answered。
+                        # 「把调用写成正文」单列一个值 —— 因为回答了「有没有完成」的
+                        # stop_reason 一旦撒谎，所有只看它的上层（网页版、演示脚本）
+                        # 都会被骗：E07 就是这样在交付一段裸 JSON 的同时报 answered。
+                        run.stop_reason = (
+                            "unresolved_intent"
+                            if kind == "intent"
+                            else "toolcall_as_text"
+                            if kind == "toolcall_text"
+                            else "answered"
+                        )
+                        run.steps.append(step)
+                        break
 
-                    run.answer = text
-                    # 纠偏用尽仍只有计划：如实记为未完成，不要假报 answered
-                    run.stop_reason = (
-                        "unresolved_intent" if announcing else "answered"
+                else:
+                    # 空回复：既没内容也没工具调用，纠偏一次。
+                    #
+                    # ⚠️ 这一支必须是 `else`，不能靠「上面 `if text:` 的每条路都以
+                    # continue/break 收尾」这个**隐式约定**。2026-09-22 加「代为执行」
+                    # 分支时就是踩了这个坑：那条路故意不 continue（要落到执行块），
+                    # 结果掉进这里，`step.note` 被覆盖成「空回复」，调用根本没执行，
+                    # 但 `recovered_toolcalls` 已经记上了 1 —— 一个静默的假账。
+                    # 是 `verify_agent_loop` 的 [4b] 把它抓出来的。
+                    step.note = "空回复，已注入纠偏提示"
+                    self._emit(
+                        {
+                            "type": "correction",
+                            "kind": "empty",
+                            "step": step_index,
+                            "note": step.note,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "你刚才没有返回任何内容。请继续："
+                                "要么调用工具获取数据，要么直接给出最终结论。"
+                            ),
+                        }
                     )
                     run.steps.append(step)
-                    break
-
-                # 空回复：既没内容也没工具调用，纠偏一次
-                step.note = "空回复，已注入纠偏提示"
-                self._emit(
-                    {
-                        "type": "correction",
-                        "kind": "empty",
-                        "step": step_index,
-                        "note": step.note,
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "你刚才没有返回任何内容。请继续："
-                            "要么调用工具获取数据，要么直接给出最终结论。"
-                        ),
-                    }
-                )
-                run.steps.append(step)
-                continue
+                    continue
 
             # ---- 执行工具 ----
             messages.append(_assistant_message(reply))
@@ -680,6 +1033,23 @@ class NavAgent:
                 # 延后不是失败，也不要模型基于残缺信息收尾：
                 # 什么都不执行时也必须回到循环顶部，让它带着新结果重新决策。
 
+            # 纠偏额度按「进展」重置 —— 而不是整个 run 只给两次。
+            #
+            # ⚠️ 判据是「**这一轮有没有通过调用通道发出调用**」，**不是调用成功**。
+            # 第一版写成「工具执行成功才还额度」，实测（2026-09-20，E07）不够用：
+            # 模型在第 2、3 步各触发一次纠偏（先用散文宣告、再把调用写成正文），
+            # 第 4 步**真的发出了** plan_route —— 但那次返回 ok=false（器械不可行），
+            # 于是额度没还；第 5 步它想换更细的器械重试，写成正文时已无额度可用，
+            # 又把 JSON 交了出去，仍然是 0/5。
+            #
+            # 想清楚这个机制管的是什么就不会写错：**纠偏治的是「输出通道」，
+            # 不是「调用结果」**。调用失败归工具失败自愈那套机制管；只要它开始用
+            # 调用通道说话，纠偏的活儿就干完了，额度该还。
+            # 不会失控 —— 外侧还有 `max_steps` 兜底，且累计次数仍如实记在
+            # `run.intent_corrections` 上（报告看的是累计值，不是剩余额度）。
+            if self.intent_corrections:
+                self.intent_corrections = 0
+
             run.steps.append(step)
             messages = self._compact(messages)
 
@@ -716,6 +1086,7 @@ class NavAgent:
                 "steps": len(run.steps),
                 "tool_calls": run.tool_call_count,
                 "intent_corrections": run.intent_corrections,
+                "recovered_toolcalls": run.recovered_toolcalls,
                 "usage": run.usage,
             }
         )

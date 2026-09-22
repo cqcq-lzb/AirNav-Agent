@@ -361,6 +361,9 @@ async def api_chat(request) -> Any:
                     "stop_reason": run.stop_reason if run is not None else None,
                     "steps": len(run.steps) if run is not None else None,
                     "intent_corrections": run.intent_corrections if run is not None else None,
+                    "recovered_toolcalls": (
+                        run.recovered_toolcalls if run is not None else None
+                    ),
                 },
                 steps=_audit_steps(run),
                 artifacts=items,
