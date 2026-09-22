@@ -228,14 +228,71 @@ def check_synthetic() -> bool:
 
 # ------------------------------------------------------------------ 真实病例
 
+def _case_package() -> Path:
+    """病例包目录 —— 走 `case_loader.cases_root()`，与别的自检同一套解析顺序。
+
+    ⚠️ 这里原本写死 `<repo>/cases`。后果不是「找不到就报错」，而是更糟的一种：
+    在**本机**（`cases/` 存在）它一直是真跑的，于是在干净 clone 上用
+    `AIRNAV_CASES_DIR=fixtures/cases` 验证时，它**绕过环境变量去读了真实病例** ——
+    测得挺绿，却根本没测到「没有真实病例时能不能跑」。
+    实测（2026-09-22，`git archive HEAD` 出来的干净副本）：
+    写死路径时这一项直接 `SimpleITK 读文件 RuntimeError` 崩掉（exit=1，判 ❌），
+    而它本该是一条**硬门禁**，缺数据时应当是 ⚪ 而不是崩。
+    """
+    from agent.core import case_loader
+
+    return Path(case_loader.cases_root()) / CASE_ID / "stage4_package"
+
+
 def _case_arrays():
-    package = ROOT / "cases" / CASE_ID / "stage4_package"
-    airway_img = sitk.ReadImage(str(package / "airway_mask.nii.gz"))
-    nodule_img = sitk.ReadImage(str(package / "nodule_selected.nii.gz"))
-    airway = sitk.GetArrayFromImage(airway_img).astype(bool)
-    nodule = sitk.GetArrayFromImage(nodule_img).astype(bool)
-    spacing = tuple(reversed(airway_img.GetSpacing()))
+    """取病例数组。缺哪一份就返回 None —— 由各 check 自己决定「能不能测」。
+
+    刻意分开返回：`radius` 只需要气道掩膜，`distance` 才需要结节掩膜。
+    合成夹具带前者、不带后者（`nodule_selected.nii.gz`），
+    于是半径场那一项在干净 clone 上**能真跑**，只剩靶点距离如实报 ⚪。
+    """
+    package = _case_package()
+
+    def _read(name: str) -> np.ndarray | None:
+        path = package / name
+        if not path.exists():
+            return None
+        return sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
+
+    airway_img = _read("airway_mask.nii.gz")
+    if airway_img is None:
+        return None, None, None
+    nodule_img = _read("nodule_selected.nii.gz")
+    spacing = tuple(reversed(sitk.ReadImage(str(package / "airway_mask.nii.gz")).GetSpacing()))
+    airway = airway_img.astype(bool)
+    nodule = None if nodule_img is None else nodule_img.astype(bool)
     return airway, nodule, spacing
+
+
+def _provenance_text() -> str:
+    from agent.core import case_loader
+
+    provenance = case_loader.cases_root_provenance()
+    kind = {"real": "真实病例", "fixture": "合成夹具", "env": "由 AIRNAV_CASES_DIR 指定"}.get(
+        provenance["kind"], provenance["kind"]
+    )
+    return f"{provenance['cases_root']}（{kind}）"
+
+
+def _print_provenance() -> None:
+    """把「这次对拍用的是真实病例还是夹具」写进输出。
+
+    ⚠️ 这一行是必须的：标签原先写的是「真实病例」，而干净 clone 上跑的是夹具 ——
+    对外说「与 scipy EDT 等价」时，得让人一眼看出是在什么数据上得出的。
+    """
+    print(f"         病例来源：{_provenance_text()}")
+
+
+def _missing_case(reason: str) -> None:
+    """缺病例数据时的统一说明 —— 带一条能照着做的补齐命令。"""
+    print(f"         ⚪ 不足以判定：{reason}")
+    print(f"         病例根目录：{_provenance_text()}")
+    print("         补齐：把真实病例放进 <repo>/cases，或设 AIRNAV_CASES_DIR 指向已有目录")
 
 
 def _sample_coords(shape, rng) -> np.ndarray:
@@ -245,9 +302,15 @@ def _sample_coords(shape, rng) -> np.ndarray:
 
 
 def check_real_radius() -> bool | None:
-    """真实病例半径场对拍。None ＝ 内存不够，不足以判定（不是失败）。"""
-    print("\n[2] 真实病例 · 半径场")
+    """病例半径场对拍（真实病例或合成夹具）。None ＝ 缺数据/内存不够，不是失败。"""
+    from agent.core import case_loader
+
+    _print_provenance()
+    print("\n[2] 病例 · 半径场")
     airway, _nodule, spacing = _case_arrays()
+    if airway is None:
+        _missing_case(f"没找到 {CASE_ID} 的 airway_mask.nii.gz")
+        return None
     voxels = int(airway.sum())
     print(f"         气道掩膜 {airway.shape}，体素 {voxels:,}，spacing={tuple(round(s, 4) for s in spacing)}")
     shell = geometry.mask_shell(airway)
@@ -286,9 +349,19 @@ def check_real_radius() -> bool | None:
 
 
 def check_real_distance() -> bool | None:
-    """真实病例靶点距离对拍。None ＝ 内存不够，不足以判定（不是失败）。"""
-    print("\n[3] 真实病例 · 靶点距离")
+    """真实病例靶点距离对拍。None ＝ 缺数据/内存不够，不是失败。
+
+    ⚠️ 这一项需要 `nodule_selected.nii.gz`（分割后的靶点掩膜），
+    合成夹具**刻意不带** —— 它只带 `nodule_raw.nii.gz`，
+    因为「哪个结节被选中」是上游分割的输出，不是夹具该伪造的东西。
+    所以干净 clone 上这一项如实报 ⚪。
+    """
+    print("\n[3] 病例 · 靶点距离")
+    _print_provenance()
     _airway, nodule, spacing = _case_arrays()
+    if nodule is None:
+        _missing_case(f"没找到 {CASE_ID} 的 nodule_selected.nii.gz（分割产物）")
+        return None
     print(f"         结节掩膜 {nodule.shape}，体素 {int(nodule.sum()):,}")
 
     if not _memory_gate("distance", int(nodule.size)):
@@ -331,9 +404,9 @@ def main() -> int:
     if args.only in ("all", "synthetic"):
         results.append(("合成体积穷举", check_synthetic()))
     if args.only in ("all", "radius"):
-        results.append(("真实病例 · 半径场", check_real_radius()))
+        results.append(("病例 · 半径场", check_real_radius()))
     if args.only in ("all", "distance"):
-        results.append(("真实病例 · 靶点距离", check_real_distance()))
+        results.append(("病例 · 靶点距离", check_real_distance()))
 
     print("\n" + "=" * 78)
     word = {True: "通过", False: "未通过", None: "不足以判定"}

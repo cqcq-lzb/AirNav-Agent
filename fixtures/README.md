@@ -5,7 +5,23 @@
 
 ## `cases/`
 
-合成病例，**24.4 KB**（真实病例 75 MB）。
+合成病例，**26.1 KB**（真实病例 75 MB）。
+
+`stage4_package/` 六个文件：
+
+| 文件 | 作用 |
+|---|---|
+| `ct.nii.gz` | 提供 spacing / origin（规划器只做物理坐标换算，不读 HU） |
+| `airway_mask.nii.gz` | 气道掩膜 —— `geometry` 半径场对拍要它 |
+| `nodule_raw.nii.gz` | 全部结节连通域 |
+| `nodule_selected.nii.gz` | 靶点掩膜（取体积最大的那颗）—— `geometry` 靶点距离对拍要它 |
+| `entry_point.nii.gz` | 入口点（固定入口模式） |
+| `stage4_manifest.json` | 服务端编号清单（按体积降序，**刻意与客户端顺序不同**） |
+
+> `nodule_selected.nii.gz` 是**后来补的**。真实 `stage4_package` 里每一份都有它，
+> 夹具原先漏了 —— 后果不是「少一个文件」，是 `verify_geometry` 的靶点距离对拍
+> 在干净 clone 上只能报 ⚪，**一条硬门禁在 CI 里永远跑不起来**。
+> 补上之后，几何对拍的三个子项在夹具上全部真跑、全绿（200000/200000 逐位相同）。
 
 ```bash
 # 用它跑全量门禁（来历会显式标出来）

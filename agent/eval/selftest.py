@@ -44,11 +44,12 @@
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from ..agent_loop import AgentRun, AgentStep
 from ..rag import get_retriever
-from .cases import case_by_id
+from .cases import CASES, case_by_id
 from .graders import GradeResult, grade_case, grade_id_binding
 from .paraphrase import PARAPHRASE_CASES, audit as audit_paraphrases, leaked_keywords
 
@@ -685,12 +686,25 @@ def _id_binding_call() -> list[tuple[str, dict[str, Any], bool, dict[str, Any]]]
     return [("list_nodule_candidates", {"case_id": "LIDC_0089"}, True, CANDIDATES_RESULT)]
 
 
-def _paraphrase_case(case_id: str):
-    """按 id 取同义改写用例 —— `case_by_id` 只覆盖基准集，取不到 E02P 这类。"""
-    for case in PARAPHRASE_CASES:
+def _bind_case(case_id: str):
+    """按 id 取用例（基准集或改写集都行），并清掉**依赖病例数据**的那条断言。
+
+    🔴 为什么必须清 —— 这是本文件里一个「被抓到过」的坑（2026-09-22）：
+
+    E02 的 `must_include` 是 `str(SERVER_1_VOXELS)`，而它随病例而变
+    （真实 LIDC_0089 = 2935，合成夹具 = 123）。本节三个夹具的回答取自
+    **真实模型原文**，说的是 2935 —— 在夹具病例根上必然对不上。
+    于是在 `git archive HEAD` 出来的干净副本上跑 `--profile ci` 时，
+    `编号口径：客户端编号说对了` 这条夹具**红了**，而判据本身完全正常。
+
+    那是**夹具写错了，不是判据坏了** —— 一个会因环境而红的自检，
+    与一个永远绿的自检同样没有信息量。体素量那条断言由门禁的评测基线
+    单独把关（它从病例 manifest 派生期望值），本节不重复考。
+    """
+    for case in (*CASES, *PARAPHRASE_CASES):
         if case.id == case_id:
-            return case
-    raise KeyError(f"没有这条同义改写用例：{case_id}")
+            return dataclasses.replace(case, must_include=())
+    raise KeyError(f"没有这条评测用例：{case_id}")
 
 
 def fixture_id_binding_ok() -> tuple[str, AgentRun]:
@@ -698,7 +712,7 @@ def fixture_id_binding_ok() -> tuple[str, AgentRun]:
 
     这条同时也是「容忍度」的基准 —— 判据改动的第一件事就是它必须仍然通过。
     """
-    case = case_by_id("E02-编号口径")
+    case = _bind_case("E02-编号口径")
     answer = (
         "LIDC_0089 的服务端清单里 1 号结节在客户端编号中是第 2 号结节。"
         "它的体素量为 2935 体素，等效直径为 21.127 mm。"
@@ -727,7 +741,7 @@ def fixture_id_binding_wrong_paraphrase() -> tuple[str, AgentRun]:
     它当时整体判 PASS，但它把客户端编号说成了 1 号（真值 2 号）。
     用真实原文而不是我编的句子当夹具，是为了让这条哨兵钉在**发生过的**错误上。
     """
-    case = _paraphrase_case("E02P-编号口径")
+    case = _bind_case("E02P-编号口径")
     answer = (
         "后台结节列表中排第一的结节候选是编号为 2 的结节，"
         "它在界面上显示的编号是 1 号。该结节的体素量为 2935 体素，"
@@ -882,7 +896,7 @@ def main() -> int:
     print("\n[4] 编号口径判据的容忍度：真句子要放行，错句子要拦住，跨小句的数字不许拽进来")
     sweep_bad = 0
     for label, answer, expected, why in _ID_BINDING_SWEEP:
-        case = case_by_id("E02-编号口径")
+        case = _bind_case("E02-编号口径")
         run = make_run(case.question, answer, _id_binding_call())
         verdict = grade_id_binding(case, run)[0]
         actual = "pass" if verdict.passed else "fail"

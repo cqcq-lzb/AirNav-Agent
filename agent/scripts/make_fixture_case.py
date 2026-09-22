@@ -174,9 +174,20 @@ def build_arrays() -> dict[str, np.ndarray]:
     for p0, p1, radius in TUBES:
         airway |= _segment_distance(SHAPE_ZYX, SPACING_XYZ, p0, p1, radius)
 
+    blobs = [_ellipsoid(SHAPE_ZYX, SPACING_XYZ, n[0:3], n[3]) for n in NODULES]
     nodule = np.zeros(SHAPE_ZYX, dtype=bool)
-    for center, radii in [(n[0:3], n[3]) for n in NODULES]:
-        nodule |= _ellipsoid(SHAPE_ZYX, SPACING_XYZ, center, radii)
+    for blob in blobs:
+        nodule |= blob
+
+    # 靶点掩膜（真实 stage4_package 里每一份都有 `nodule_selected.nii.gz`）。
+    # ⚠️ 这一份原先漏了，直接后果是 `verify_geometry` 的「靶点距离」对拍
+    # 在干净 clone 上只能报 ⚪ —— 一条**硬门禁**在 CI 里永远跑不起来。
+    # 补上它，这项才能在合成数据上真跑（`distance_to_mask_at` vs scipy EDT
+    # 是纯算法对拍，与用的是不是真实解剖无关）。
+    #
+    # 选谁：取**体积最大**的那颗（= 候选 3）。这是夹具的约定，不是临床规则 ——
+    # 刻意写成「按体积取最大」而不是写死下标，免得以后改了 NODULES 就悄悄错位。
+    selected = max(blobs, key=np.count_nonzero)
 
     entry = _ellipsoid(SHAPE_ZYX, SPACING_XYZ, ENTRY_CENTER_ZYX,
                        (ENTRY_RADIUS_MM,) * 3)
@@ -186,7 +197,13 @@ def build_arrays() -> dict[str, np.ndarray]:
     ct = np.full(SHAPE_ZYX, -900, dtype=np.int16)
     ct[airway] = -100
     ct[nodule] = 40
-    return {"airway": airway, "nodule": nodule, "entry": entry, "ct": ct}
+    return {
+        "airway": airway,
+        "nodule": nodule,
+        "nodule_selected": selected,
+        "entry": entry,
+        "ct": ct,
+    }
 
 
 def _write(name: str, array: np.ndarray, out_dir: Path, dtype) -> Path:
@@ -208,6 +225,7 @@ def write_case(out_root: Path) -> Path:
     _write("ct.nii.gz", arrays["ct"], pkg, np.int16)
     _write("airway_mask.nii.gz", arrays["airway"], pkg, np.uint8)
     _write("nodule_raw.nii.gz", arrays["nodule"], pkg, np.uint8)
+    _write("nodule_selected.nii.gz", arrays["nodule_selected"], pkg, np.uint8)
     _write("entry_point.nii.gz", arrays["entry"], pkg, np.uint8)
 
     # 服务端编号（stage4_manifest.json）：按**体积降序**，刻意与客户端顺序不同，
