@@ -41,6 +41,10 @@
 11 条来自真实模型与语义等价写法的「必须放行」，7 条「必须拦住」。
 它是这个判据唯一的验收依据 —— 只有「抓住了」不算数，
 还要证明它没把换了个说法的正确答案一起抓走。
+
+最后一节（`[5]`）验的是 `--repeat N` 的**聚合语义**：稳定通过 / 稳定失败 /
+**偶发**（既过过也挂过）必须被区分开。加了重复跑却不区分「偶发」，
+等于把「单次分数不能当结论」这条纪律写进了代码却没用它做判断。
 """
 from __future__ import annotations
 
@@ -48,9 +52,11 @@ import dataclasses
 from typing import Any
 
 from ..agent_loop import AgentRun, AgentStep
+from ..llm.client import ChatReply, ToolCallRequest
 from ..rag import get_retriever
-from .cases import CASES, case_by_id
+from .cases import CASES, EvalCase, case_by_id
 from .graders import GradeResult, grade_case, grade_id_binding
+from .harness import run_suite
 from .paraphrase import PARAPHRASE_CASES, audit as audit_paraphrases, leaked_keywords
 
 
@@ -781,6 +787,84 @@ _ID_BINDING_SWEEP: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+# ---------------------------------------------------------- [5] 重复聚合的哨兵
+#
+# `--repeat N` 是「单次评测分数不能当结论」这条纪律的机器化。它必须能区分：
+#     全过      -> passed=True   flaky=False
+#     全挂      -> passed=False  flaky=False
+#     偶发 2/3  -> passed=False  flaky=True    ← 这一条才是它存在的理由
+# 第三种最容易被写错（把「过过一次」当成通过，偶发失败就被采样掩盖了），
+# 所以必须由哨兵钉住 —— 不测就等于没有。
+
+_REPEAT_CASE = EvalCase(
+    id="T-重复聚合",
+    question="当前有哪些病例？",
+    category="测试",
+    rubric="必须调用 list_cases 才能回答",
+    # 刻意只依赖 list_cases：这条哨兵要能在**没有任何病例数据**的机器上跑，
+    # 也不能依赖某个候选的体素量 / 靶距那类派生值。
+    expect_tools=("list_cases",),
+)
+
+
+class _FlakyClient:
+    """本次尝试第一句就摆烂（不调工具）→ 该次必挂。"""
+
+    def __init__(self, degrade_first: bool = False, always_fail: bool = False) -> None:
+        self.label = "flaky-probe"
+        self._calls = 0
+        self._degrade_first = degrade_first
+        self._always_fail = always_fail
+
+    def chat(self, messages, tools=None) -> ChatReply:
+        self._calls += 1
+        if self._always_fail or (self._degrade_first and self._calls == 1):
+            return ChatReply(content="已列出全部病例。")
+        if self._calls == 1:
+            return ChatReply(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(id="c1", name="list_cases", arguments="{}")
+                ],
+            )
+        return ChatReply(content="已列出全部病例。")
+
+
+def _repeat_client_factory(
+    degrade_attempt_at: int | None = None, always_fail: bool = False
+):
+    """⚠️ `client_factory` 是**每次尝试都会调用一次**的，所以计数必须闭包在外层。
+
+    第一版探针把计数写在客户端实例里 → 每次尝试都新建客户端、计数归零 →
+    永远劣化不到，于是「偶发」那一栏跑出来是 3/3 全过。
+    **这类 bug 不报错，只是让测试永远绿** —— 正是「不测就等于没有」要防的形态。
+    """
+    state = {"n": 0}
+
+    def _factory(_case):
+        state["n"] += 1
+        return _FlakyClient(
+            degrade_first=(state["n"] == degrade_attempt_at),
+            always_fail=always_fail,
+        )
+
+    return _factory
+
+
+def _repeat_shape(
+    degrade_attempt_at: int | None = None,
+    always_fail: bool = False,
+    repeat: int = 3,
+):
+    report = run_suite(
+        cases=[_REPEAT_CASE],
+        client_factory=_repeat_client_factory(degrade_attempt_at, always_fail),
+        backend="selftest",
+        repeat=repeat,
+    )
+    return report.results[0]
+
+
 # ------------------------------------------------------------------ 断言
 GOOD_FIXTURES = (
     ("正常轨迹（含正确的自理算术）", fixture_good),
@@ -914,6 +998,63 @@ def main() -> int:
         f"{len(_ID_BINDING_SWEEP) - sweep_bad} 条判定符合预期"
     )
 
+    print("\n[5] 重复聚合：稳定通过 / 稳定失败 / 偶发 必须被区分开")
+    repeat_checks = (
+        # (标签, 用例结果, (期望 passed, 期望通过次数, 期望尝试次数, 期望 flaky))
+        ("全过", _repeat_shape(), (True, 3, 3, False)),
+        ("全挂", _repeat_shape(always_fail=True), (False, 0, 3, False)),
+        ("偶发 2/3", _repeat_shape(degrade_attempt_at=2), (False, 2, 3, True)),
+    )
+    for label, item, want in repeat_checks:
+        got = (item.passed, item.pass_count, item.attempts, item.flaky)
+        seq = " ".join(
+            f"{a.index}:{'过' if a.passed else '挂'}" for a in item.attempts_detail
+        )
+        if got == want:
+            print(
+                f"  PASS  {label}  passed={got[0]} {got[1]}/{got[2]} "
+                f"flaky={got[3]}  [{seq}]"
+            )
+        else:
+            failures.append(f"重复聚合 [{label}]：期望 {want}，实际 {got}（{seq}）")
+            print(f"  FAIL  {label}  期望 {want}，实际 {got}  [{seq}]")
+
+    # 「代表结果取第一次失败」这条也要钉：偶发用例在报告里必须显示**失败那次**
+    # 的明细。取最后一次的话，「3 次挂 2 次、最后一次侥幸过了」会显示成通过，
+    # 把两次失败**抹掉**。
+    flaky_item = _repeat_shape(degrade_attempt_at=2)
+    if flaky_item.failures and flaky_item.tool_chain == []:
+        print(
+            "  PASS  偶发用例的代表明细取自失败那次"
+            f"（失败项 {[g.grader for g in flaky_item.failures]}，调用链为空 —— 那次确实没调工具）"
+        )
+    else:
+        failures.append(
+            "偶发用例的代表明细没有取自失败那次："
+            f"failures={[g.grader for g in flaky_item.failures]} "
+            f"chain={flaky_item.tool_chain}"
+        )
+        print("  FAIL  偶发用例的代表明细没有取自失败那次（会把失败抹掉）")
+
+    # 缺省 repeat=1 必须与加这个参数之前逐字段一致：基线 / 看板 / CI 都建在旧语义上。
+    single = _repeat_shape(repeat=1)
+    if (
+        single.attempts,
+        single.pass_count,
+        single.flaky,
+        single.passed,
+        len(single.attempts_detail),
+    ) == (1, 1, False, True, 0):
+        print("  PASS  repeat=1 保持旧语义（attempts=1、不带 attempts_detail）")
+    else:
+        failures.append(
+            "repeat=1 语义漂了："
+            f"attempts={single.attempts} pass_count={single.pass_count} "
+            f"flaky={single.flaky} passed={single.passed} "
+            f"detail={len(single.attempts_detail)}"
+        )
+        print("  FAIL  repeat=1 语义漂了（旧报告/基线/看板都建在旧语义上）")
+
     print("\n" + "=" * 72)
     if failures:
         print(f"自检未通过，共 {len(failures)} 项异常：")
@@ -924,7 +1065,8 @@ def main() -> int:
         f"自检通过：{len(GOOD_FIXTURES)} 份正常轨迹全部通过，"
         f"{len(BAD_FIXTURES)} 份缺陷轨迹全部被对应打分器检出，"
         f"{len(PARAPHRASE_CASES)} 条同义改写与基准逐字段一致，"
-        f"编号口径容忍度 {len(_ID_BINDING_SWEEP)} 条全部符合预期"
+        f"编号口径容忍度 {len(_ID_BINDING_SWEEP)} 条全部符合预期，"
+        f"重复聚合 {len(repeat_checks)} + 2 条语义断言全部符合预期"
     )
     return 0
 

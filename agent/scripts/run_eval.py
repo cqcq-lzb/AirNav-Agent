@@ -11,8 +11,25 @@
     # 真实模型（本地 Ollama；默认模型见 PRESETS，与本机已装的对齐）
     python -m agent.scripts.run_eval --backend ollama --timeout 180
 
+    # 每条重复 3 次：把「偶发失败」和「稳定失败」分开（单次分数不能当结论）
+    python -m agent.scripts.run_eval --backend gpu41 --cases both --repeat 3
+
     # 云端
     python -m agent.scripts.run_eval --backend deepseek --api-key $DEEPSEEK_API_KEY
+
+关于 `--repeat N`
+-----------------
+单次跑出来的分数**不能当结论** —— 实测同一个用例同一份代码，09-17 过、09-20 挂；
+E07 是稳定失败 0/5（协议问题），E15 是偶发（5/5 过）。只跑一次的话这两种形态
+在报告里长得一模一样，而处置完全相反。
+
+`--repeat N` 每个用例跑 N 次（每次都是全新的 agent 与会话），报告给出**两个**读数：
+
+- **用例级**（`passed` = N 次全过）—— 保守读数，用来卡基线，防偶发抬分
+- **尝试级通过率**（Σ通过次数 / Σ尝试次数）—— 能力读数，用来比较改前改后
+
+⚠️ `repeat > 1` 时输出文件名会加 `_x{N}` 后缀，**不覆盖单次报告** ——
+两个数字的分量不同，混在一起就没人分得清哪个是哪个了。
 
 关于后端命名
 ------------
@@ -30,7 +47,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.eval.cases import CASES  # noqa: E402
-from agent.eval.harness import format_progress, run_suite  # noqa: E402
+from agent.eval.harness import (  # noqa: E402
+    format_attempt,
+    format_progress,
+    run_suite,
+)
 from agent.eval.heuristic import HeuristicClient, SloppyClient  # noqa: E402
 from agent.eval.paraphrase import PARAPHRASE_CASES, audit as audit_paraphrases  # noqa: E402
 from agent.eval.report import (  # noqa: E402
@@ -99,6 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT))
     parser.add_argument("--stem", default=None)
     parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "每条用例重复跑 N 次（默认 1）。用例级判定 = N 次全过（保守，卡基线）；"
+            "报告另给尝试级通过率与偶发用例清单。N>1 时输出文件名带 _xN 后缀，"
+            "不覆盖单次报告"
+        ),
+    )
+    parser.add_argument(
         "--merge",
         nargs="+",
         default=None,
@@ -156,6 +188,10 @@ def _make_client_factory(args):
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    if args.repeat < 1:
+        print(f"--repeat 必须 >= 1，收到 {args.repeat}")
+        return 2
 
     # 改写集自检必须在跑之前过。它验的是「题面真的绕开了关键词表」与
     # 「判定字段与基准逐字段一致」—— 这两条破一条，两组分数就不可比，
@@ -234,6 +270,15 @@ def main() -> int:
     print(f"开始评测：{label}")
     print(f"用例集：{args.cases}（{len(selected_cases)} 条）")
     print(f"用例筛选：include={args.include} exclude={args.exclude}")
+    if args.repeat > 1:
+        print(
+            f"重复：每条 {args.repeat} 次（共约 {len(selected_cases) * args.repeat} 次运行）"
+            "；用例级=N 次全过，另给尝试级通过率"
+        )
+
+    def on_attempt(case, record) -> None:
+        # 逐次打印：N 倍时长之后，只有跑完才看见进度是不可接受的
+        print(format_attempt(case, record))
 
     def on_result(result) -> None:
         print(format_progress(result))
@@ -245,6 +290,8 @@ def main() -> int:
         on_result=on_result,
         include=args.include,
         exclude=args.exclude,
+        repeat=args.repeat,
+        on_attempt=on_attempt if args.repeat > 1 else None,
     )
 
     print_console_summary(report)
@@ -252,6 +299,10 @@ def main() -> int:
     stem = args.stem or f"eval_{args.backend}" + (
         "" if args.cases == "original" else f"_{args.cases}"
     )
+    if args.repeat > 1:
+        # 单次报告与重复报告的「通过数」含义不同（一个是恰好，一个是全过），
+        # 写进同一个文件名就是两种口径互相覆盖。
+        stem = f"{stem}_x{args.repeat}"
     paths = write_report(
         report,
         args.out_dir,

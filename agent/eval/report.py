@@ -11,12 +11,16 @@ from typing import Any
 
 from .cases import case_by_id
 from .graders import GradeResult
-from .harness import CaseResult, EvalReport
+from .harness import AttemptRecord, CaseResult, EvalReport
 
 GRADER_LABELS = {
     "tool_selection": "工具选型",
     "tool_arguments": "参数正确性",
     "grounding": "数字可溯源",
+    # ⚠️ 加打分器时这张表也要跟着加。漏了不会报错，只会让失败明细里
+    # 混进一个裸 key（`id_binding`）—— 加第 7 类时漏过一次，第九条纪律
+    # 「把数量/清单写死在断言里的地方，加东西时要全局搜一遍」说的就是这类表。
+    "id_binding": "编号口径",
     "citations": "引用有效性",
     "refusal": "边界拒答",
     "robustness": "稳健性",
@@ -50,6 +54,27 @@ def load_report(path: str | Path) -> EvalReport:
             )
             for item in row.get("grades", [])
         ]
+        attempts_detail = [
+            AttemptRecord(
+                index=int(item.get("index") or 0),
+                passed=bool(item.get("passed")),
+                grades=[
+                    GradeResult(
+                        grader=g.get("grader", "?"),
+                        passed=bool(g.get("passed")),
+                        detail=g.get("detail", ""),
+                        severity=g.get("severity", "error"),
+                        extra=g.get("extra") or {},
+                    )
+                    for g in item.get("failures", [])
+                ],
+                error=item.get("error"),
+                elapsed_s=float(item.get("elapsed_s") or 0.0),
+                tools_called=list(item.get("tools") or []),
+                stop_reason=item.get("stop_reason") or "",
+            )
+            for item in row.get("attempts_detail", [])
+        ]
         report.results.append(
             CaseResult(
                 case=case,
@@ -60,6 +85,7 @@ def load_report(path: str | Path) -> EvalReport:
                 tools_called=list(row.get("tools_called") or []),
                 answer=row.get("answer") or "",
                 stop_reason=row.get("stop_reason") or "",
+                attempts_detail=attempts_detail,
             )
         )
     return report
@@ -75,6 +101,13 @@ def merge_reports(paths: list[str | Path]) -> EvalReport:
     return merged
 
 
+def _attempt_sequence(item: CaseResult) -> str:
+    """`1:过 2:挂 3:过` —— 把「哪次挂」写进报告，而不是只给一个布尔。"""
+    return " ".join(
+        f"{a.index}:{'过' if a.passed else '挂'}" for a in item.attempts_detail
+    )
+
+
 def to_markdown(report: EvalReport, title: str = "Agent 评测报告") -> str:
     summary = report.to_dict()
     lines: list[str] = [
@@ -84,8 +117,36 @@ def to_markdown(report: EvalReport, title: str = "Agent 评测报告") -> str:
         f"- 时间：{report.started_at}",
         f"- 用例：**{summary['passed']} / {summary['total']}** "
         f"通过（{summary['pass_rate'] * 100:.1f}%）",
-        "",
     ]
+    if report.repeat > 1:
+        # 报告必须自证身份：不写这一行，过几天没人分得清这 28/30 是
+        # 「单次恰好」还是「3 次里稳定过的」—— 两者的分量完全不同。
+        lines += [
+            f"- **每条重复 {report.repeat} 次**。用例级判定 = **N 次全过**"
+            f"（保守读数，用来卡基线）；"
+            f"尝试级通过率 **{summary['attempts_passed']} / "
+            f"{summary['attempts_total']}**"
+            f"（{summary['run_pass_rate'] * 100:.1f}%）",
+        ]
+    lines.append("")
+
+    flaky = report.flaky_cases()
+    if flaky:
+        lines += [
+            "## 偶发用例（既过过也挂过）",
+            "",
+            "> 这类用例的处置与「稳定失败」相反：稳定失败要改代码，"
+            "偶发先看采样 —— 所以必须单独列出来，不能被平均进通过率里。",
+            "",
+            "| 用例 | 重复结果 | 尝试级 |",
+            "|---|---|---|",
+        ]
+        for item in flaky:
+            lines.append(
+                f"| {item.case.id} | {_attempt_sequence(item)} | "
+                f"{item.pass_count}/{item.attempts} |"
+            )
+        lines.append("")
 
     failures = [item for item in report.results if not item.passed]
     if failures:
@@ -95,6 +156,12 @@ def to_markdown(report: EvalReport, title: str = "Agent 评测报告") -> str:
             lines.append("")
             lines.append(f"> 判定口径：{item.case.rubric}")
             lines.append("")
+            if item.attempts > 1:
+                verdict = "**偶发**，不是稳定失败" if item.flaky else "每次都失败"
+                lines.append(
+                    f"- 重复 {item.attempts} 次：`{_attempt_sequence(item)}`"
+                    f"（{verdict}）"
+                )
             if item.error:
                 lines.append(f"- **运行异常**：`{item.error}`")
             for grade in item.failures:
@@ -124,11 +191,23 @@ def to_markdown(report: EvalReport, title: str = "Agent 评测报告") -> str:
         lines.append(f"| {label} | {bucket['passed']} | {bucket['failed']} |")
     lines.append("")
 
-    lines += ["## 全部用例", "", "| 用例 | 类别 | 结果 | 工具调用 |", "|---|---|---|---|"]
+    header = ["用例", "类别", "结果", "工具调用"]
+    if report.repeat > 1:
+        header.insert(3, "重复")
+    lines += ["## 全部用例", "", "| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for item in report.results:
-        mark = "通过" if item.passed else "**失败**"
+        if item.flaky:
+            mark = "**偶发**"
+        elif item.passed:
+            mark = "通过"
+        else:
+            mark = "**失败**"
         tool_text = " → ".join(item.tool_chain) or "—"
-        lines.append(f"| {item.case.id} | {item.case.category} | {mark} | {tool_text} |")
+        row = [item.case.id, item.case.category, mark]
+        if report.repeat > 1:
+            row.append(f"{item.pass_count}/{item.attempts}")
+        row.append(tool_text)
+        lines.append("| " + " | ".join(row) + " |")
     lines.append("")
 
     return "\n".join(lines)
@@ -170,6 +249,24 @@ def print_console_summary(report: EvalReport) -> dict[str, Any]:
         f"通过：{summary['passed']} / {summary['total']}"
         f"（{summary['pass_rate'] * 100:.1f}%）"
     )
+    if report.repeat > 1:
+        print(f"重复：每条 {report.repeat} 次（用例级 = N 次全过）")
+        print(
+            f"尝试级通过率：{summary['attempts_passed']} / "
+            f"{summary['attempts_total']}"
+            f"（{summary['run_pass_rate'] * 100:.1f}%）"
+        )
+        flaky = report.flaky_cases()
+        if flaky:
+            print(f"\n偶发用例（{len(flaky)} 条，先看采样、别急着改代码）：")
+            for item in flaky:
+                print(
+                    f"  - {item.case.id}  {_attempt_sequence(item)}"
+                    f"  {item.pass_count}/{item.attempts}"
+                )
+        else:
+            print("偶发用例：无（这份读数没有歧义）")
+
     print("\n分类：")
     for category, bucket in report.by_category_stats().items():
         print(

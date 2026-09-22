@@ -17,15 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-GRADER_LABELS = {
-    "tool_selection": "工具选型",
-    "tool_arguments": "参数正确性",
-    "grounding": "数字可溯源",
-    "citations": "引用有效性",
-    "refusal": "边界拒答",
-    "robustness": "稳健性",
-    "runner": "运行",
-}
+from .report import GRADER_LABELS
 
 CATEGORY_ORDER = ("工具选型", "分项归因", "知识检索", "边界拒答", "稳健性")
 
@@ -44,6 +36,15 @@ def _pct(value: float) -> str:
 
 def _rate(summary: dict[str, Any]) -> float:
     return float(summary.get("pass_rate") or 0.0)
+
+
+def _attempt_rate(summary: dict[str, Any]) -> float:
+    """尝试级通过率（`--repeat N`）。缺省时与 `_rate` 同值。"""
+    return float(summary.get("run_pass_rate") or summary.get("pass_rate") or 0.0)
+
+
+def _repeat_of(summary: dict[str, Any]) -> int:
+    return int(summary.get("repeat") or 1)
 
 
 def _case_map(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -111,6 +112,7 @@ def render(
     --bg: #f6f7f9; --panel: #ffffff; --line: #e4e7ec; --text: #1f2937;
     --muted: #6b7280; --ok: #15803d; --okbg: #eaf7ef;
     --bad: #b91c1c; --badbg: #fdeeee; --accent: #2563eb; --accentbg: #eef4ff;
+    --warn: #b45309; --warnbg: #fef3c7;
   }}
   * {{ box-sizing: border-box; }}
   body {{ margin: 0; background: var(--bg); color: var(--text);
@@ -141,6 +143,7 @@ def render(
     font-size: 12px; font-weight: 600; white-space: nowrap; }}
   .pill.ok {{ background: var(--okbg); color: var(--ok); }}
   .pill.bad {{ background: var(--badbg); color: var(--bad); }}
+  .pill.warn {{ background: var(--warnbg); color: var(--warn); }}
   .mono {{ font-family: ui-monospace, Consolas, monospace; font-size: 12px;
     color: #374151; word-break: break-all; }}
   .bar {{ height: 8px; border-radius: 999px; background: #edf0f4; overflow: hidden;
@@ -188,6 +191,21 @@ def render(
       <div class="label">区分度</div>
       <div class="big">{( _rate(primary) - _rate(compare)) * 100:.0f} pt</div>
       <div class="note">同一套用例下两个策略通过率之差</div>
+    </div>"""
+        )
+
+    # ---- 重复运行（--repeat N）----
+    # 用例级通过率（N 次全过）与尝试级通过率是两个不同的量：
+    # 前者保守、用来卡基线；后者才是「能力」。只显示一个都会误导。
+    repeat = _repeat_of(primary)
+    flaky_rows = primary.get("flaky") or []
+    if repeat > 1:
+        parts.append(
+            f"""<div class="card {'bad' if flaky_rows else ''}">
+      <div class="label">重复运行（每条 {repeat} 次）</div>
+      <div class="big">{primary.get('attempts_passed')} / {primary.get('attempts_total')}</div>
+      <div class="note">尝试级通过率 {_pct(_attempt_rate(primary))} ·
+        上面那张卡是用例级（N 次全过，保守）· 偶发 <b>{len(flaky_rows)}</b> 条</div>
     </div>"""
         )
 
@@ -242,18 +260,36 @@ def render(
             g for g in row.get("grades", [])
             if not g.get("passed") and g.get("severity", "error") == "error"
         ]
-        mark = (
-            "<span class='pill ok'>通过</span>"
-            if row.get("passed")
-            else "<span class='pill bad'>失败</span>"
-        )
+        if row.get("flaky"):
+            # 偶发既不是通过也不是失败：写成「通过」会掩盖它挂过，
+            # 写成「失败」又看不出它过过 —— 而两者的处置完全相反。
+            mark = "<span class='pill warn'>偶发</span>"
+        elif row.get("passed"):
+            mark = "<span class='pill ok'>通过</span>"
+        else:
+            mark = "<span class='pill bad'>失败</span>"
+        if _repeat_of(primary) > 1 and row.get("attempts"):
+            mark += (
+                f"<div class='q nowrap'>{row.get('pass_count')}/{row.get('attempts')}</div>"
+            )
         tools = " → ".join(row.get("tools_called") or []) or "—"
         cell = (
             f"<td><b>{_esc(case_id)}</b><div class='q'>{_esc(row.get('question', ''))}"
             f"</div>"
         )
         if failures:
-            items = "".join(
+            seq = ""
+            if row.get("attempts_detail"):
+                chain = " ".join(
+                    f"{a.get('index')}:{'过' if a.get('passed') else '挂'}"
+                    for a in row["attempts_detail"]
+                )
+                tail = "（偶发 = 先看采样，别急着改代码）" if row.get("flaky") else ""
+                seq = (
+                    f"<li>重复 {row.get('attempts')} 次：<code>{_esc(chain)}</code>"
+                    f"{tail}</li>"
+                )
+            items = seq + "".join(
                 f"<li><b>{_esc(GRADER_LABELS.get(g.get('grader'), g.get('grader')))}</b>："
                 f"{_esc(g.get('detail'))}</li>"
                 for g in failures
@@ -296,7 +332,7 @@ def render(
     parts.append(
         """</table>
   <div class="sub" style="margin-top:24px">
-    全部判定均为硬指标：工具选型、参数正确性、数字可溯源、引用有效性、边界拒答、稳健性。
+    全部判定均为硬指标：工具选型、参数正确性、数字可溯源、编号口径、引用有效性、边界拒答、稳健性。
     打分器本身另有自检（agent/eval/selftest.py），用合成轨迹验证它确实能抓住对应缺陷。
   </div>
 </div>

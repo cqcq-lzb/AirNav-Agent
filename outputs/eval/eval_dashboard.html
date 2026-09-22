@@ -9,6 +9,7 @@
     --bg: #f6f7f9; --panel: #ffffff; --line: #e4e7ec; --text: #1f2937;
     --muted: #6b7280; --ok: #15803d; --okbg: #eaf7ef;
     --bad: #b91c1c; --badbg: #fdeeee; --accent: #2563eb; --accentbg: #eef4ff;
+    --warn: #b45309; --warnbg: #fef3c7;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -39,6 +40,7 @@
     font-size: 12px; font-weight: 600; white-space: nowrap; }
   .pill.ok { background: var(--okbg); color: var(--ok); }
   .pill.bad { background: var(--badbg); color: var(--bad); }
+  .pill.warn { background: var(--warnbg); color: var(--warn); }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
     color: #374151; word-break: break-all; }
   .bar { height: 8px; border-radius: 999px; background: #edf0f4; overflow: hidden;
@@ -60,7 +62,7 @@
 <div class="wrap">
   <h1>AirNav Agent 评测看板</h1>
   <div class="sub">逐用例隔离运行 · 硬判定打分（无 LLM 当裁判）· 报告生成于
-    2026-09-16 14:38:07</div>
+    2026-09-20 17:50:51</div>
 
   <div class="cards">
 <div class="card ok">
@@ -170,7 +172,7 @@
 </tr>
 </table>
   <div class="sub" style="margin-top:24px">
-    全部判定均为硬指标：工具选型、参数正确性、数字可溯源、引用有效性、边界拒答、稳健性。
+    全部判定均为硬指标：工具选型、参数正确性、数字可溯源、编号口径、引用有效性、边界拒答、稳健性。
     打分器本身另有自检（agent/eval/selftest.py），用合成轨迹验证它确实能抓住对应缺陷。
   </div>
 </div>
