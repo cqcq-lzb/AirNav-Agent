@@ -44,7 +44,7 @@ PY=/path/to/.venv-mcp/Scripts/python.exe     # 本机为 D:/AirNav-Agent/.venv-m
 
 两者都是自包含的，直接转给别人看，不需要装任何东西。
 
-Windows 上也可以直接双击 `跑回归门禁.bat` / `启动网页Agent.bat`。
+Windows 上也可以直接双击 `跑评测.bat`（评测）/ `跑回归门禁.bat`（回归）/ `启动网页Agent.bat`（网页版）。
 
 ### 没有真实病例数据也能跑
 

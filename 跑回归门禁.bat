@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title AirNav-Agent 回归门禁
+title AirNav-Agent Regression Gate
 setlocal
 cd /d "%~dp0"
 
@@ -17,14 +17,23 @@ if not exist "%PY%" (
     exit /b 1
 )
 
-REM 不带参数 = 全量（local 档）；也可以从命令行传，例如：
-REM   跑回归门禁.bat --profile ci
-REM   跑回归门禁.bat --fast
-REM   跑回归门禁.bat --only geometry,planner
+rem ---------------------------------------------------------------------
+rem Keep this file ASCII-only and CRLF. cmd.exe re-reads a .bat by byte
+rem offset; LF-only or multi-byte text makes it execute misplaced line
+rem fragments (it once re-ran the "rebuild the venv" hint above and
+rem silently flipped include-system-site-packages to false).
+rem ---------------------------------------------------------------------
+rem No arguments = full local profile. Arguments are passed through:
+rem   this bat --profile ci
+rem   this bat --fast
+rem   this bat --only geometry,planner
 "%PY%" -m agent.scripts.gate %*
+set "RC=%ERRORLEVEL%"
 
 echo.
 echo ----------------------------------------------------------------------
-echo  Report: outputs\gate\gate_report.md
+echo  exit code: %RC%
+echo  Report : outputs\gate\gate_report.md
 echo ----------------------------------------------------------------------
 pause
+exit /b %RC%
