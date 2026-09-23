@@ -1,21 +1,18 @@
 @echo off
 chcp 65001 >nul
-title AirNav-Agent 网页版
+title AirNav-Agent Web UI
 setlocal
 cd /d "%~dp0"
 
 set "PY=%~dp0.venv-mcp\Scripts\python.exe"
 set PYTHONIOENCODING=utf-8
 
-REM Default backend shown in the page. The UI has a selector, so this only
-REM decides what is preselected. AIRNAV_WEB_PORT changes the port.
 set "AIRNAV_DEFAULT_BACKEND=gpu41"
 if not defined AIRNAV_WEB_PORT set "AIRNAV_WEB_PORT=8777"
 
 if not exist "%PY%" (
     echo [ERROR] Interpreter not found:
     echo         %PY%
-    echo.
     echo Rebuild it with:
     echo    D:\miniforge\envs\dicom\python.exe -m venv --system-site-packages .venv-mcp
     pause
@@ -25,18 +22,28 @@ if not exist "%PY%" (
 echo ======================================================================
 echo  AirNav-Agent  Web UI
 echo  interpreter: %PY%
-echo  opening     http://127.0.0.1:%AIRNAV_WEB_PORT%
+echo  url         http://127.0.0.1:%AIRNAV_WEB_PORT%
 echo  stop with   Ctrl+C
 echo ======================================================================
 echo.
 
-REM Give the browser a moment to open before the server prints its banner.
-start "" "http://127.0.0.1:%AIRNAV_WEB_PORT%"
+rem ---------------------------------------------------------------------
+rem Open the browser only AFTER the port answers. The old version opened it
+rem first, so the first page load always failed and it looked broken.
+rem The waiter runs inside this window (start /b) and the server stays in
+rem the foreground, so Ctrl+C still stops it.
+rem AIRNAV_WEB_OPEN=0 makes the waiter only probe (never open a browser).
+rem Keep this file ASCII-only and CRLF - see the header of 跑评测.bat.
+rem ---------------------------------------------------------------------
+start "" /b "%PY%" -m agent.scripts.open_web_ui
 
 "%PY%" -m agent.web.server
+set "RC=%ERRORLEVEL%"
 
 echo.
 echo ----------------------------------------------------------------------
-echo  Server stopped. Viewers are under: outputs\viewers
+echo  exit code: %RC%
+echo  viewers  : outputs\viewers
 echo ----------------------------------------------------------------------
 pause
+exit /b %RC%
