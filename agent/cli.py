@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 if __package__ in (None, ""):
@@ -298,6 +299,57 @@ def cmd_cache(args: argparse.Namespace) -> int:
     return 0
 
 
+def probe_backend(client) -> dict[str, Any]:
+    """探活 LLM 后端，返回**结构化**结论（而不是只打印一行字）。
+
+    为什么要结构化：模型看不见 stdout。如果降级信息只打在控制台，
+    它既不会改变 Agent 的行为，也不会出现在 `--json` 里 ——
+    下游（评测、报告、网页端）就无从知道「这次回答是在后端不可达时产生的」。
+    所以这里同时给出 `degraded` 字段与一句人话，两边都能消费。
+
+    返回：
+      {"ok": bool, "degraded": bool, "detail": str, "models": [...]}
+      · ok=True            后端可达且目标模型在列表里
+      · degraded=True      后端**不可达**（或目标模型缺失），但流程仍可继续
+    """
+    if not hasattr(client, "health"):
+        # scripted / 回放后端没有网络，天然不算降级
+        return {"ok": True, "degraded": False, "detail": f"{client.label}（本地回放）"}
+
+    health = client.health()
+    if health.get("ok") and health.get("has_target", True):
+        models = health.get("models") or []
+        return {
+            "ok": True, "degraded": False, "models": models,
+            "detail": f"可达，模型 {client.model} 在列（共 {len(models)} 个）",
+        }
+    if health.get("ok"):
+        models = health.get("models") or []
+        return {
+            "ok": False, "degraded": True, "models": models,
+            "detail": f"后端可达，但没有模型 {client.model}"
+                      f"（可用 {len(models)} 个）→ 需要先 ollama pull",
+        }
+    return {
+        "ok": False, "degraded": True, "models": [],
+        "detail": f"后端不可达：{health.get('detail')}",
+    }
+
+
+def print_degradation(probe: dict[str, Any], backend: str) -> None:
+    """把降级状态打成一眼能看懂的横幅。"""
+    print("=" * 66)
+    print("⚠️  降级运行：推理后端不可用")
+    print(f"    {probe['detail']}")
+    print("    · 依赖模型判断的步骤会失败；**纯工具查询仍可用**")
+    print("      （病例结构、候选列表、几何量、合规报告都不需要模型）")
+    if backend == "gpu41":
+        print("    核实后端是否起来：ssh gpu41 后跑 ~/ollama/start_ollama_gpu41.sh")
+    elif backend == "ollama":
+        print("    本机先启动 Ollama（运行 ollama serve），或换 --backend gpu41")
+    print("=" * 66)
+
+
 def run_question(args: argparse.Namespace, question: str) -> int:
     session = make_session(args)
     registry = build_registry()
@@ -310,15 +362,26 @@ def run_question(args: argparse.Namespace, question: str) -> int:
         verbose=args.verbose,
     )
 
+    # 探活一次：不可达时**照常继续**，只是把降级状态显式标出来。
+    # ⚠️ 有意的取舍：不在这里 `return 1`。因为大量问题只走工具（不需要模型），
+    #    提前退出会把「能用」也一起挡掉 —— 判据是「能不能跑」，不是「后端在不在」。
+    probe = probe_backend(client)
+    degraded = probe["degraded"]
+
     if not args.json:
         print(f"[后端] {client.label}")
+        if degraded:
+            print_degradation(probe, args.backend)
         print(f"[问题] {question}")
         print("-" * 66)
 
     run = agent.run(question)
 
     if args.json:
-        print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
+        payload = run.to_dict()
+        # 降级状态进 JSON —— 让下游能区分「答错了」与「后端没起来」
+        payload["backend_probe"] = probe
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(run.answer)
         print("-" * 66)
@@ -326,6 +389,8 @@ def run_question(args: argparse.Namespace, question: str) -> int:
             f"[统计] {len(run.steps)} 步 / {run.tool_call_count} 次工具调用 / "
             f"{run.elapsed_s:.1f}s / 结束原因 {run.stop_reason}"
         )
+        if degraded:
+            print(f"[降级] ⚠️ 后端不可达（{probe['detail']}）—— 以上结果可能不完整")
         if run.usage:
             print(f"[用量] {json.dumps(run.usage, ensure_ascii=False)}")
         stats = registry.stats()
@@ -347,6 +412,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
         return 1
 
     print(f"AirNav-Agent 交互模式 | 后端：{client.label}")
+    # 启动时探活一次：不可达**不退出**，只打降级横幅。
+    # ⚠️ 与 doctor 的分工：doctor 是「环境自检」，后端不可达 = 自检不过 = rc 1；
+    #    repl 是「拿来用」，工具类问题不该被后端拖累。
+    probe = probe_backend(client)
+    if probe["degraded"]:
+        print_degradation(probe, args.backend)
     print("输入问题回车执行；exit 退出；tools 查看工具；cases 列出病例。")
     agent = NavAgent(
         client=client,

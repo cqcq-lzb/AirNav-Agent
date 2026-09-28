@@ -221,6 +221,17 @@ def _checks() -> list[Check]:
             needs_cases=False,
             category="治理",
         ),
+        Check(
+            key="backend",
+            title="后端探活与降级（不可达照常启动 · 状态进结构化字段）",
+            argv=["-m", "agent.scripts.check_backend"],
+            # 用必然连不上的 RFC 5737 地址 + health 桩构造两态，不联网不需要模型。
+            # ⚠️ 它必真跑一次 `agent.cli ask`（子进程），所以比纯单元自检慢一些 ——
+            #    但「不可达时有没有提前 return 1」只在子进程里看得见。
+            needs_cases=False,
+            timeout=600,
+            category="治理",
+        ),
     ]
 
 
