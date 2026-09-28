@@ -50,6 +50,18 @@ BASELINE = ROOT / "agent" / "eval" / "baseline.json"
 REPORT_JSON = REPORT_DIR / "gate_report.json"
 REPORT_MD = REPORT_DIR / "gate_report.md"
 
+# 门禁跑评测时每条用例重复几次。
+#
+# 🔴 为什么不能是 1：单次评测分数是**抽签**。同一份代码、同一批用例，实测三次跑出
+#    93.3% / 83.3% / 91.1%，其中 E07 是稳定失败、E15 是偶发。既然「单次分数是抽签」
+#    已经被 `--repeat` 亲手证明（提交 594b287），那把它接回门禁时**就不能再用单次读数**
+#    —— 否则硬门禁建立在一个有噪声的数上：一条本该过的评测可能抽到差的那次直接判红，
+#    反过来也可能侥幸过了。
+#
+# 3 次是权衡：heuristic 后端单条约 3.3s，15 条 × 3 次 ≈ 150s，门禁总时长仍可控。
+# 取到「N 次全过」这个**保守读数**（而不是尝试级通过率）与基线比较。
+EVAL_REPEAT = 3
+
 
 # ------------------------------------------------------------------ 检查项定义
 
@@ -181,7 +193,7 @@ def _checks() -> list[Check]:
         ),
         Check(
             key="eval",
-            title="评测基线（15 用例 / 7 打分器）",
+            title=f"评测基线（15 用例 / 7 打分器 · 每条 {EVAL_REPEAT} 次）",
             argv=[
                 "-m",
                 "agent.scripts.run_eval",
@@ -189,10 +201,12 @@ def _checks() -> list[Check]:
                 "heuristic",
                 "--stem",
                 "gate_eval",
+                "--repeat",
+                str(EVAL_REPEAT),
             ],
             needs_cases=True,
             hard=True,
-            timeout=1200,
+            timeout=3600,
             category="评测",
         ),
     ]
@@ -321,8 +335,15 @@ def run_check(check: Check, python: str, node: str | None, scratch: Path) -> Che
 
 
 def parse_eval(python: str, scratch: Path) -> dict | None:
-    """读门禁那次评测的 JSON，用来和基线比。"""
-    path = ROOT / "outputs" / "eval" / "gate_eval.json"
+    """读门禁那次评测的 JSON，用来和基线比。
+
+    ⚠️ 文件名与 `EVAL_REPEAT` 绑定：`run_eval --repeat N`（N>1）会给 stem 加
+    `_x{N}` 后缀，**刻意不覆盖单次报告**。所以这里必须按同一个规则拼路径 ——
+    否则 `--repeat 3` 一开，`gate_eval.json` 根本不存在，本函数静默返回 None，
+    基线对比整段跳空，门禁**看起来还是绿的**。这类「改了 A 忘了 B」是最难发现的。
+    """
+    stem = "gate_eval" if EVAL_REPEAT <= 1 else f"gate_eval_x{EVAL_REPEAT}"
+    path = ROOT / "outputs" / "eval" / f"{stem}.json"
     if not path.is_file():
         return None
     try:
@@ -335,6 +356,19 @@ def parse_eval(python: str, scratch: Path) -> dict | None:
         "passed": data.get("passed"),
         "pass_rate": data.get("pass_rate"),
         "all_graders_pass": data.get("all_graders_pass"),
+        # repeat 读数（单次时与上面三项一致，见 harness 的注释）
+        #
+        # ⚠️ 这里**没有** stable_passed 这种字段，别再去找它。
+        # `harness.aggregate_attempts` 把用例的 `passed` 定义成
+        # `all(item.passed for item in attempts)`（N 次全过），所以「N 次全过」这条
+        # 保守读数就是上面的 `passed`，不是另有一个字段。原来这里读了一个不存在的
+        # 键，`.get()` 对缺键返回 None，于是 `if stable is not None` 永远为假 ——
+        # 重复读数整段变成死代码，而门禁仍然显示绿色，**改了却等于没改**。
+        "repeat": data.get("repeat"),
+        "run_pass_rate": data.get("run_pass_rate"),
+        "attempts_total": data.get("attempts_total"),
+        "attempts_passed": data.get("attempts_passed"),
+        "flaky": data.get("flaky") or [],
         "cases": [
             {
                 "case_id": case.get("case_id"),
@@ -384,6 +418,32 @@ def compare_baseline(eval_summary: dict | None, update: bool) -> tuple[bool, lis
         f" → 本次 {eval_summary['passed']}/{eval_summary['total']}"
     )
     ok = True
+
+    repeat = eval_summary.get("repeat") or 1
+    if repeat > 1:
+        # 「N 次全过」= `passed`（见 parse_eval 的注释），也就是上面那行已经打过的数。
+        # 这里补的是**同一个数的另一个读法**：尝试级通过率 —— 它才是「能力」读数，
+        # 用来判断改前改后。两者必须同时出现，只报前者会把偶发失败放大成能力退化，
+        # 只报后者会把偶发失败洗成达标。
+        attempts_total = eval_summary.get("attempts_total") or 0
+        attempts_passed = eval_summary.get("attempts_passed") or 0
+        run_rate = eval_summary.get("run_pass_rate")
+        notes.append(
+            f"重复 {repeat} 次：上面的 {eval_summary['passed']}/{eval_summary['total']}"
+            f" 是**「{repeat} 次全过」的保守读数**（门禁即据此卡基线）；"
+            f"尝试级 {attempts_passed}/{attempts_total}"
+            + (f"（{round(run_rate * 100, 1)}%）" if run_rate is not None else "")
+        )
+        flaky = eval_summary.get("flaky") or []
+        if flaky:
+            # 偶发用例单列 —— 它们既不是「通过」也不是「稳定失败」，
+            # 用 PASS/FAIL 两态会把两边的信息一起丢掉。
+            notes.append(
+                f"ℹ️ 偶发用例（{repeat} 次里过了一些也挂了一些）："
+                + "、".join(str(item.get("case_id")) for item in flaky)
+                + " —— 它们不计入「N 次全过」，但也不单独判失败"
+            )
+
     if (eval_summary["passed"] or 0) < (base.get("passed") or 0):
         ok = False
         notes.append("❌ 通过数低于基线 —— 是模型/机制退步，还是打分器变松？必须写清原因")
@@ -483,9 +543,27 @@ def write_reports(checks: list[Check], eval_summary, baseline_ok, baseline_notes
             "## 评测基线",
             "",
             f"- 后端：`{eval_summary['backend']}`",
-            f"- 通过：**{eval_summary['passed']}/{eval_summary['total']}**"
+            f"- 通过（N 次全过）：**{eval_summary['passed']}/{eval_summary['total']}**"
             f"（{round((eval_summary['pass_rate'] or 0) * 100, 1)}%）",
         ]
+        repeat = eval_summary.get("repeat") or 1
+        if repeat > 1:
+            # 报告里也要写「跑了几次」。只印一个百分比的话，过几天没人分得清
+            # 28/30 是单次抽的，还是 3 次里稳定过的 —— 报告必须自证身份。
+            lines.append(
+                f"- 重复：每条 **{repeat} 次**，尝试级通过 "
+                f"{eval_summary.get('attempts_passed')}/{eval_summary.get('attempts_total')}"
+                f"（{round((eval_summary.get('run_pass_rate') or 0) * 100, 1)}%）"
+            )
+            flaky = eval_summary.get("flaky") or []
+            if flaky:
+                lines.append(
+                    "- 偶发用例："
+                    + "、".join(
+                        f"`{item.get('case_id')}` {item.get('pass_count')}/{item.get('attempts')}"
+                        for item in flaky
+                    )
+                )
     lines += ["", "## 基线与门槛", ""] + [f"- {note}" for note in baseline_notes]
     if failed:
         lines += ["", "## 失败明细", ""]
