@@ -4,9 +4,9 @@
 
 ## 已完成并实测的部署
 
-- 服务器：`192.168.8.41`
-- API 文档：`http://192.168.8.41:18000/docs`
-- 健康检查：`http://192.168.8.41:18000/health`
+- 服务器：`gpu-node`（已脱敏，请替换成你自己的主机）
+- API 文档：`http://gpu-node:18000/docs`
+- 健康检查：`http://gpu-node:18000/health`
 - API Key：当前按要求设置为 `123456`（仅适合受信任局域网测试）
 - 容器：`airway-navigation`
 - 镜像：`airway-navigation:latest`
@@ -19,7 +19,7 @@
 ## 您现在怎么使用
 
 1. 保持 H100 服务器和 Docker 服务运行。
-2. 在同一局域网电脑的浏览器打开 `http://192.168.8.41:18000/docs`。
+2. 在同一局域网电脑的浏览器打开 `http://gpu-node:18000/docs`。
 3. 点击右上角 **Authorize**，在 `X-API-Key` 输入 `123456`。
 4. 展开 `POST /api/v1/jobs`，点击 **Try it out**。
 5. `ct` 选择 `.nii` 或 `.nii.gz` CT；`case_id` 填不含空格的病例编号；`gpu` 填 `0`。
@@ -27,7 +27,7 @@
 7. 在 `GET /api/v1/jobs/{jid}` 中填入 `job_id` 查询状态。
 8. 状态为 `succeeded` 后，在 `GET /api/v1/jobs/{jid}/package` 下载结果 ZIP。
 
-前端连接时，把 API Base URL 设置为 `http://192.168.8.41:18000`，请求头发送 `X-API-Key: 123456`。前端不需要安装 Docker；只有运行后端的服务器需要 Docker 和 NVIDIA Container Toolkit。
+前端连接时，把 API Base URL 设置为 `http://gpu-node:18000`，请求头发送 `X-API-Key: 123456`。前端不需要安装 Docker；只有运行后端的服务器需要 Docker 和 NVIDIA Container Toolkit。
 
 ## 服务器管理员命令
 

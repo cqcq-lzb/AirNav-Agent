@@ -4,7 +4,7 @@ Airway Navigation Complete GPU Backend
 Image: airway-navigation:latest
 Image ID: sha256:0239caecfadc7dae08275ef498a962beb65538e9796102a55196b0d4cfb4833d
 Image size: 8865703836 bytes
-Validated host: 192.168.8.41, NVIDIA H100 PCIe
+Validated host: gpu-node, NVIDIA H100 PCIe
 Validated API port: 18000
 Validated job: 3e0dfc6c472e464d8f0f2432f590cd0c
 Validated result: succeeded / complete

@@ -9,7 +9,7 @@
 
 | 项 | 值 |
 |---|---|
-| 服务器 | `192.168.8.41`（NF5468-M7-A0-R0-00），用户 `wcq` |
+| 服务器 | `gpu-node`（这里本来是真实内网地址，已脱敏；请替换成你自己的 GPU 主机），用户 `your-user` |
 | GPU | 8× H100 PCIe 80GB |
 | **占用哪张卡** | **只有 GPU 0**（其余 1/2/4~7 常被训练任务占着） |
 | Ollama | 0.34.1，装在 `/data2/home/wcq/ollama` |
@@ -40,7 +40,7 @@ tail -f serve.log           # 看日志
 重装或换台服务器时，把这三个（或前两个）scp 过去，`chmod +x` 即可：
 
 ```bash
-scp deploy/gpu41/*.sh wcq@192.168.8.41:/data2/home/wcq/ollama/
+scp deploy/gpu41/*.sh your-user@gpu-node:/data2/home/your-user/ollama/
 ```
 
 启动脚本里那几个环境变量**不要删**，每个都对应一个踩过的坑：
@@ -158,7 +158,7 @@ set PY=D:\AirNav-Agent\.venv-mcp\Scripts\python.exe
 不想每次都写 `--backend`，也可以只改地址沿用本地预设：
 
 ```bat
-set AIRNAV_GPU41_URL=http://192.168.8.41:11434/v1
+set AIRNAV_GPU41_URL=http://gpu-node:11434/v1
 set AIRNAV_GPU41_MODEL=qwen2.5:14b
 ```
 

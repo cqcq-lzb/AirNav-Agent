@@ -209,6 +209,18 @@ def _checks() -> list[Check]:
             timeout=3600,
             category="评测",
         ),
+        Check(
+            key="creds",
+            title="脱敏自检（凭据 · DLP 密文 · 硬编码内网地址）",
+            argv=["-m", "agent.scripts.scan_creds"],
+            # 只读工作区里的可扫文件，不依赖 cases/，CI 档也能跑。
+            # ⚠️ 这一项以前**不在门禁里** —— 而 `完成定义.md` 的 L1-5 却写着
+            #    「判据：门禁已有 scan_creds 项」。也就是说「入库文件里 grep
+            #    不出内网 IP」这条**从来没被任何检查执行过**，于是文档里出现了
+            #    两个互相矛盾的计数（11/21 与 38/81，实测 13/22）。
+            needs_cases=False,
+            category="治理",
+        ),
     ]
 
 

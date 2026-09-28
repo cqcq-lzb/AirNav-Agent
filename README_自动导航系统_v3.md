@@ -167,7 +167,7 @@ server_config.json
 默认服务器：
 
 ```text
-192.168.8.41
+gpu-node
 端口 22
 用户 wcq
 GPU 5

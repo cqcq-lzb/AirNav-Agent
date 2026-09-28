@@ -171,7 +171,7 @@ http://localhost:6080/vnc.html?autoconnect=1&resize=scale
 5. 点击「开始服务器分割并打开导航」；
 6. 处理完成后自动打开交互导航界面。
 
-容器需要能访问 `192.168.8.41:22`，默认 bridge 网络即可。
+容器需要能访问 `gpu-node:22`，默认 bridge 网络即可。
 
 ## 六、常用命令
 
@@ -236,7 +236,7 @@ Docker Hub 直连被重置，确认 `daemon.json` 已配置 `registry-mirrors` �
 | 容器内环境自检 | 7 项全部通过 |
 | GUI 窗口 | `"经支气管肺结节自动导航系统 v3.2"` 自动最大化至 1920x1063，铺满整屏 |
 | noVNC 页面 | HTTP 200 |
-| 到分割服务器 192.168.8.41:22 | 连通，返回 SSH-2.0-OpenSSH_8.9p1 |
+| 到分割服务器 gpu-node:22 | 连通，返回 SSH-2.0-OpenSSH_8.9p1 |
 
 容器内实际依赖版本：
 

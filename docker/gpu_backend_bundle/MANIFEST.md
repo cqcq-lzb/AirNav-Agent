@@ -1,6 +1,6 @@
 # Complete backend manifest
 
-This bundle is designed for the production pipeline currently configured on `192.168.8.41`.
+This bundle is designed for the production pipeline currently configured on `gpu-node`.
 
 ## Pipeline
 

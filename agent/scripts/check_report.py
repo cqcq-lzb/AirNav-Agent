@@ -89,7 +89,7 @@ def _seed(artifact_path: Path) -> None:
         run_id="run-aaa", question=f"{SENTINEL} 的 3 号候选能过 1.5mm 吗？",
         answer=f"可以，代价 1.42。{SENTINEL}",
         backend="gpu41", model="qwen2.5:14b", verdict="ok",
-        actor="wcq", client_ip="192.168.8.10", user_agent="selfcheck/1.0",
+        actor="wcq", client_ip="203.0.113.10", user_agent="selfcheck/1.0",
         elapsed_s=9.13, params={"max_steps": 8, "stop_reason": "answered"},
         steps=[{"step": 1, "tool": "plan_route", "ok": True},
                {"step": 1, "tool": "render_viewer", "ok": True}],
@@ -99,14 +99,14 @@ def _seed(artifact_path: Path) -> None:
     audit.record_run(
         run_id="run-bbb", question="LNDB_0196 有哪些候选？", answer="共 3 个。",
         backend="gpu41", model="qwen2.5:14b", verdict="ok",
-        actor="wcq", client_ip="192.168.8.10", elapsed_s=6.2,
+        actor="wcq", client_ip="203.0.113.11", elapsed_s=6.2,
         steps=[{"step": 1, "tool": "list_nodule_candidates", "ok": True},
                {"step": 2, "tool": "plan_route", "ok": False}],
         case_ids=["LNDB_0196"])
     audit.record_run(
         run_id="run-ccc", question="随便说说", answer=None,
         backend="heuristic", model="rules", verdict="unresolved_intent",
-        actor="guest", client_ip="10.0.0.7", elapsed_s=1.1)
+        actor="guest", client_ip="203.0.113.12", elapsed_s=1.1)
     audit.record_auth(allowed=False, path="/api/chat", client_ip="203.0.113.9",
                       user_agent="curl/8.0", actor="anonymous")
     audit.record_auth(allowed=True, path="/health", client_ip="127.0.0.1")

@@ -1,10 +1,15 @@
 """提交前自检：凭据泄漏 + DLP 密文混入。
 
-两个检查，都只输出「键名 + 判定」，**绝不打印值本身**：
+三个检查，都只输出「键名 + 判定」，**绝不打印值本身**：
 
   1. 凭据扫描 —— 遍历可扫文件，找出疑似真实凭据的字面量
   2. 密文扫描 —— 本机 DLP 会把某些文件改写成密文（文件头 %TSD-Header-###%），
      git.exe 不在解密白名单里，照常提交就会把密文写进仓库
+  3. 内网地址扫描 —— 硬编码的私有网段 IP 会把内网拓扑随仓库发出去。
+     ⚠️ 这一项曾经**只写在文档里**（「入库文件 grep 不出内网 IP」），
+     从来没被任何检查覆盖 —— 结果是文档里出现了两个互相矛盾的计数
+     （「11 文件 / 21 处」「38 文件 / 81 处」），实测是 13 文件 / 22 处。
+     **不测就等于没有**：现在它是门禁的一部分。
 
 用法::
 
@@ -60,11 +65,38 @@ PLACEHOLDER_HINTS = (
     "your", "replace", "xxx", "changeme", "placeholder", "todo", "example",
     "sample", "dummy", "填入", "填写", "替换", "示例", "请改",
     "<", ">", "${", "...", "***",
+    # ⚠️ "selfcheck" 是自检夹具的标志：`check_web.py` 用
+    # "selfcheck-token-2f8a1c9d" 当临时 token 测鉴权层，那是**长值 +
+    # 字符类 2**，会被长哈希规则判成真凭据 → 每次跑门禁都多一条红。
+    # 判据：值里自带「这是自检」的语义标记，就不是「疑似真凭据」。
+    "selfcheck", "fixture",
 )
 # 弱口令字面量（本身就是风险，但也确实是"配置值"）
 WEAK_LITERALS = {"123456", "password", "admin", "root", "test", "abc123", "1234", "000000"}
 
 DLP_MAGIC = b"%TSD-Header-###%"
+
+# ---------------------------------------------------------------- 内网地址
+# 私有网段：10/8、172.16/12、192.168/16，以及常见容器网段。
+# 只匹配 IPv4 字面量，四段都锚定，避免命中版本号（如 192.168.1.1 之外的 1.2.3）。
+PRIVATE_IP_RE = re.compile(
+    r"(?<![\d.])("
+    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r")(?![\d.])"
+)
+# 占位符主机名 —— 换成这些就等于已经脱敏，不算泄漏。
+# ⚠️ 判据钉「地址本身是不是私有网段字面量」，不钉「这行有没有出现 gpu-node」：
+#    文档里允许既写占位符、又在同一行解释「这里本来是真实地址」。
+PLACEHOLDER_HOSTS = ("gpu-node", "your-host", "192.168.0.1", "127.0.0.1", "localhost")
+
+# 显式豁免标记：确要保留真实地址当「本机兜底默认值」时，在**同一行**写上它。
+# 为什么不做成「文件级豁免」：文件级豁免会连注释/文档一起放过，
+# 而我们要保护的恰恰是「这个地址被意外复制到别处」。标记放在行上，
+# 复制出去的行不带标记 → 立刻报出来。
+# ⚠️ 这个标记本身就是**清单**：想查「到底留了几处真地址」，grep 它就够。
+IP_ALLOW_MARKER = "airnav-allow-real-ip"
 
 # ⚠️ 为什么不能直接用「全文含 NUL」当 DLP 填充的判据 —— 两种形态必须分开：
 #   · DLP 的块对齐填充是**尾部**补 \x00，正文是干净的文本
@@ -188,7 +220,37 @@ def classify(value: str) -> tuple[str, bool]:
     return f"短值（长度 {len(v)}）", False
 
 
+def scan_internal_ip(rel: str, text: str, findings: list[tuple[str, str, str]]) -> None:
+    """找出硬编码的私有网段 IP。
+
+    白名单（不算命中）：
+      - 该行含有占位符主机名 / 回环地址（已脱敏的形态）
+      - 该行带显式豁免标记 `IP_ALLOW_MARKER`（＝有意保留的兜底默认值）
+    """
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        # 纯注释行不算「硬编码」—— 注释里提到地址是在**说明**它，
+        # 不是在用它。跑不过这条的话，这份检查自身就成了漏报源。
+        if not stripped or stripped.startswith(("#", "//", "*", "<!--")):
+            continue
+        if IP_ALLOW_MARKER in line:
+            continue
+        for m in PRIVATE_IP_RE.finditer(line):
+            ip = m.group(1)
+            if ip in PLACEHOLDER_HOSTS:
+                continue
+            # 同一行出现占位符主机名 → 已经脱敏，地址只是被引用来说明
+            if any(h in line for h in PLACEHOLDER_HOSTS if not h[0].isdigit()):
+                continue
+            findings.append((
+                "内网地址", f"{rel}:{lineno}",
+                f"硬编码私有网段 IP（前缀 {ip.rsplit('.', 2)[0]}.*）"
+                f" → 请改环境变量或 gpu-node 占位符",
+            ))
+
+
 def scan_text(rel: str, text: str, findings: list[tuple[str, str, str]]) -> None:
+    scan_internal_ip(rel, text, findings)
     for lineno, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "//", "*", "<!--")):
@@ -307,12 +369,21 @@ def main() -> int:
     creds = [f for f in findings if f[0] == "凭据"]
     dlp = [f for f in findings if f[0] in ("密文", "填充")]
     encoding = [f for f in findings if f[0] == "编码"]
+    internal_ip = [f for f in findings if f[0] == "内网地址"]
 
     if dlp:
         print(f"🔴 DLP 改写（{len(dlp)} 处）—— 这些内容不能被 git 正确版本化：")
         for _, where, desc in dlp:
             print(f"    {where}")
             print(f"        {desc}")
+        print()
+    if internal_ip:
+        print(f"🔴 硬编码内网地址（{len(internal_ip)} 处）—— 会把内网拓扑随仓库发出去：")
+        for _, where, desc in internal_ip:
+            print(f"    {where}")
+            print(f"        {desc}")
+        print("    修法：代码走环境变量兜底，文档/示例换 `gpu-node` 占位符；")
+        print("          确要保留原地址时，同一行写上 `gpu-node` 说明已脱敏即可放行。")
         print()
     if creds:
         print(f"🔴 疑似凭据（{len(creds)} 处）—— 逐条人工确认，误报很常见：")
@@ -327,12 +398,12 @@ def main() -> int:
         print()
 
     if not findings:
-        print("✅ 未发现凭据泄漏或 DLP 密文")
+        print("✅ 未发现凭据泄漏、DLP 密文或硬编码内网地址")
         return 0
 
     print("提示：凭据扫描的误报率不低（header 名、变量名、占位串都会命中），")
     print("      务必逐个打开对应行确认，不要直接按结论改代码。")
-    return 1 if (creds or dlp) else 0
+    return 1 if (creds or dlp or internal_ip) else 0
 
 
 if __name__ == "__main__":

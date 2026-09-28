@@ -79,7 +79,10 @@ from PySide6.QtWidgets import (
 WINDOW_TITLE = "经支气管肺结节自动导航系统 v3.2"
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "server_host": "192.168.8.41",
+    # 服务器地址走环境变量 `AIRNAV_SERVER_HOST`，默认值只是本机开发兜底；
+    # 正式部署请复制 server_config.example.json 为 server_config.json 再改。
+    "server_host": os.environ.get("AIRNAV_SERVER_HOST")
+    or "192.168.8.41",  # airnav-allow-real-ip 本机兜底
     "server_port": 22,
     "server_user": "wcq",
     "default_gpu": 5,

@@ -62,9 +62,11 @@ class LLMError(RuntimeError):
 
 PRESETS: dict[str, dict[str, Any]] = {
     "gpu41": {
-        # 内网 GPU 服务器（8×H100）。地址可用环境变量覆盖，不必改代码：
-        #   set AIRNAV_GPU41_URL=http://192.168.8.41:11434/v1
-        "base_url": "http://192.168.8.41:11434/v1",
+        # 内网 GPU 服务器（8×H100）。**地址一律走环境变量**，默认值只是
+        # 本机开发时的兜底，方便不设变量也能跑通：
+        #   set AIRNAV_GPU41_URL=http://<你的GPU主机>:11434/v1
+        # 换机器 / 换端口改环境变量即可，不必改代码。
+        "base_url": "http://192.168.8.41:11434/v1",  # airnav-allow-real-ip 本机兜底
         "url_env": "AIRNAV_GPU41_URL",
         "model": "qwen2.5:14b",
         "model_env": "AIRNAV_GPU41_MODEL",
