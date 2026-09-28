@@ -262,7 +262,9 @@ def _search_max_device_diameter(
 
     返回：
       max_device_diameter_mm  最大可通过外径；None 表示「连最细的也不行」
-      bounded_by_scan_limit   True 表示在上界处就能过，真值只知 ≥ upper_mm（未收敛）
+      bounded_by_scan_limit   True 表示**限制来自解剖本身**（路径最窄处已不允许更粗的
+                              器械），此时 max_device_diameter_mm 等于最窄处、再调大
+                              扫描上界也不会有别的答案。**不是**「你给的上界太小」
       search_steps / resolution_mm
       minimum_diameter_on_route_mm / profile_used
 
@@ -270,19 +272,6 @@ def _search_max_device_diameter(
     注意 `min_route_diameter` 是路径最窄处的**直径**，与「最大可通过外径」
     是两个量 —— 调用方报给医生时不要混。
     """
-    if ctx.is_reachable(case_id, candidate_id, upper_mm, device_margin_mm):
-        probe = ctx.plan(case_id, candidate_id, None, upper_mm, device_margin_mm)
-        return {
-            "max_device_diameter_mm": upper_mm,
-            "bounded_by_scan_limit": True,
-            "search_steps": 0,
-            "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
-            "minimum_diameter_on_route_mm": round(
-                probe.metrics["minimum_diameter_mm"], 3
-            ),
-            "profile_used": probe.profile_name,
-        }
-
     low = DEVICE_SEARCH_LOW_MM
     if not ctx.is_reachable(case_id, candidate_id, low, device_margin_mm):
         return {
@@ -294,7 +283,46 @@ def _search_max_device_diameter(
             "profile_used": None,
         }
 
-    high = upper_mm
+    # 二分的不变量：`high` 必须是**已知不可通过**的值。
+    if not ctx.is_reachable(case_id, candidate_id, upper_mm, device_margin_mm):
+        # 常见路径：请求上界本身就过不去，直接拿它当 high。
+        # 与加下面那段之前**逐字段一致**（一次 is_reachable(upper) + 一次 is_reachable(low)）。
+        high = upper_mm
+    else:
+        # 上界处就能过 → 需要一个更高的 high 才能收敛。
+        #
+        # ⚠️ 原来这里**直接返回**（bounded_by_scan_limit=True + 一句「把
+        # max_diameter_mm 调大再测一次」）。实测那样会把模型推成**线性试**：
+        # E13 的调用链是 plan_route → scan_device_fit → scan_device_fit →
+        # scan_device_fit，回答里写着「需要进一步扩大扫描上界来确定精确值」。
+        # 现在改成**内部自动抬高上界继续收敛** —— 省掉一整轮 Agent 往返，
+        # 而且不再依赖模型是否听话（见 docs/评测区分度_同义改写实验.md §8.9）。
+        #
+        # 抬到哪：器械外径的**天然硬上界**是「路径最窄处的直径」——
+        # 比最窄处还粗的器械在几何上不可能通过。
+        probe = ctx.plan(case_id, candidate_id, None, upper_mm, device_margin_mm)
+        ceiling = round(probe.metrics["minimum_diameter_mm"], 3)
+        if ceiling <= upper_mm:
+            # 请求上界已达到/超过最窄处 → 没有更粗的几何可能
+            return {
+                "max_device_diameter_mm": upper_mm,
+                "bounded_by_scan_limit": True,
+                "search_steps": 0,
+                "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
+                "minimum_diameter_on_route_mm": ceiling,
+                "profile_used": probe.profile_name,
+            }
+        if ctx.is_reachable(case_id, candidate_id, ceiling, device_margin_mm):
+            # 连最窄处都能通过（余量为 0 之类的边界）→ 真值即最窄处，无须二分
+            return {
+                "max_device_diameter_mm": ceiling,
+                "bounded_by_scan_limit": True,
+                "search_steps": 1,
+                "resolution_mm": DEVICE_SEARCH_RESOLUTION_MM,
+                "minimum_diameter_on_route_mm": ceiling,
+                "profile_used": probe.profile_name,
+            }
+        high = ceiling
     steps = 0
     while (
         high - low > DEVICE_SEARCH_RESOLUTION_MM
@@ -676,20 +704,27 @@ def register_tools(registry: ToolRegistry) -> None:
         max_mm = found["max_device_diameter_mm"]
 
         if found["bounded_by_scan_limit"]:
+            # ⚠️ 这一支的含义**收紧了**：不是「你给的上界太小，请调大重试」，
+            # 而是「限制来自解剖本身」—— 路径最窄处已经不允许更粗的器械，
+            # 再调大 max_diameter_mm 也不会有别的答案。
+            # 原来那句「调大再测一次」会把模型推成线性试（§8.9 实测 3 次连续调用），
+            # 现在搜索已在工具内收敛，**不要把活推回给模型**。
+            #
+            # 注意这里返回 `max_mm`（= found 里的值），**不是** `max_diameter_mm`
+            # （那是调用方传进来的扫描上界）—— 旧代码回显参数，让「上限」这个字段
+            # 名不副实；现在它必须是真值。
             return {
                 "case_id": case_id,
                 "candidate_id": candidate_id,
-                "max_device_diameter_mm": max_diameter_mm,
+                "max_device_diameter_mm": max_mm,
                 "bounded_by_scan_limit": True,
                 "minimum_diameter_on_route_mm": found["minimum_diameter_on_route_mm"],
                 "note": (
-                    f"在扫描上界 {max_diameter_mm}mm 处即可通过，"
-                    f"所以**最大可通过外径 ≥ {max_diameter_mm}mm** —— 本次没触到上界，"
-                    f"把 max_diameter_mm 调大再测一次才能收敛到精确值。"
-                    f"⚠️ 本分支的 max_device_diameter_mm 只是回显你传进来的扫描上界，"
-                    f"含义是「至少能过这么粗」；"
-                    f"minimum_diameter_on_route_mm 是路径最窄处的**直径**，是另一个量，"
-                    f"**不要拿它当最大可通过外径**报给医生。"
+                    f"最粗可通过约 {max_mm}mm 外径器械"
+                    f"（安全余量 {device_margin_mm}mm）；"
+                    f"限制来自**解剖本身** —— 路径最窄处 "
+                    f"{found['minimum_diameter_on_route_mm']}mm，"
+                    f"再调大 max_diameter_mm 也不会得到更粗的结果，**不必重试**。"
                 ),
             }
 

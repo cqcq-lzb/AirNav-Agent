@@ -339,6 +339,32 @@ def layer_5_failure_contract() -> int:
             f"failure={bound} scan={scan_max}",
         )
 
+    # ---- ⑤ 扫描上界只影响成本，不影响结论 ------------------------------
+    # 旧实现「命中上界就直接返回 + 回显参数 + 让模型调大再测一次」，
+    # 实测把模型推成**线性试**：E13 的调用链是 plan_route → scan_device_fit ×3，
+    # 回答里写着「需要进一步扩大扫描上界来确定精确值」
+    # （docs/评测区分度_同义改写实验.md §8.9 的未修邻项）。
+    # 现在改成工具内部把上界抬到「路径最窄处直径」这个天然硬上界后继续收敛，
+    # 于是这条不变量必须成立：**上界取多少都不能改变答案**（除分辨率以内）。
+    tight = run("scan_device_fit", case_id="LIDC_0089", candidate_id=3,
+                max_diameter_mm=2.0)
+    base = scan.get("max_device_diameter_mm")
+    narrow = tight.get("max_device_diameter_mm")
+    if isinstance(base, (int, float)) and isinstance(narrow, (int, float)):
+        failures += not check(
+            abs(float(narrow) - float(base)) <= 0.1 + 1e-9,
+            "扫描上界取 2.0mm 与默认值得到同一个答案（≤1 个分辨率步长）",
+            f"上界 2.0 → {narrow}mm，默认 → {base}mm",
+        )
+        # 旧实现最直接的病征：把调用方传进来的上界原样回显成「答案」。
+        # 只在真值确实高于该上界时才断言（否则 2.0 本来就可能是正解）。
+        if float(base) > 2.0 + 0.1 + 1e-9:
+            failures += not check(
+                abs(float(narrow) - 2.0) > 1e-9,
+                "过小的扫描上界被工具内部抬高，而不是回显成答案",
+                f"max_device_diameter_mm={narrow!r}（不能等于传入的 2.0）",
+            )
+
     # ---- ③ 气道不通（真实数据凑不出，用派生用例补）--------------------
     # `LIDC_0089` 的四个候选在 0.1mm 器械下都还有路，所以走不到这一支。
     # 按「真实数据凑不出的边界值用派生夹具补」的纪律，直接调纯函数：
