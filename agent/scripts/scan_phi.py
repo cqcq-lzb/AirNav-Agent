@@ -407,7 +407,8 @@ def selftest() -> int:
     print("\n[自证] 扫描器必须「该叫的时候叫，不该叫的时候闭嘴」")
     failures = 0
     total = [0]
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors：临时目录是草稿，删不掉不算自检失败（§十三 13.18）
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         base = Path(tmp)
 
         def run(label: str, path: Path, expect_hit: bool) -> None:

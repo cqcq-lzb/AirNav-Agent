@@ -352,11 +352,13 @@ def layer_6_gate() -> int:
     _reset()
     _seed(_dir().parent / "art3.html")
 
-    gate = report_mod.GATE_JSON
+    # ⚠️ 「缺失」用「把路径指到一个不存在的文件」来表达，**不去删**旧文件 ——
+    # 本机（Windows + 沙箱/shim）会拒绝删除 Temp 下的文件（WinError 5），
+    # 删不成会让自检**假红**：断言全过、rc 却是 1（见 PROJECT-NOTES §十三 13.18）。
+    # 语义上也更直白：缺失 = 这个路径下没有文件，本来就不该依赖删除权限。
+    report_mod.GATE_JSON = _dir().parent / "gate-does-not-exist.json"
 
     # ① 缺失
-    if gate.is_file():
-        gate.unlink()
     items = report_mod.verdicts(_collect())
     item = next(i for i in items if i["name"] == "回归门禁")
     if not check(item["state"] == report_mod.NONE, "门禁文件缺失 → 未判定", item["state"]):
@@ -433,7 +435,8 @@ def layer_7_path_semantics() -> int:
 
 def main() -> int:
     real_gate, real_baseline = report_mod.GATE_JSON, report_mod.BASELINE
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors：临时目录是草稿，删不掉不算自检失败（§十三 13.18）
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         os.environ["AIRNAV_AUDIT_DIR"] = str(Path(tmp) / "audit")
         report_mod.GATE_JSON = Path(tmp) / "gate_report.json"
         report_mod.BASELINE = Path(tmp) / "baseline.json"

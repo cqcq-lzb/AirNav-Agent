@@ -614,7 +614,11 @@ def layer_5_ui_script(node: str) -> int:
     if not check(ok_ids, "内联 JS 引用的元素 id 在 HTML 里都存在", detail):
         failures += 1
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors：临时目录是**草稿**，删不掉它不算自检失败。
+    # 本机（Windows + 沙箱/shim）删 Temp 里的文件会被拒 → TemporaryDirectory.__exit__
+    # 抛 PermissionError/NotADirectoryError，**在断言全过之后**把进程掀掉 →
+    # 表现为「自检失败」但数一下 PASS/FAIL 其实全过。见 PROJECT-NOTES §十三 13.18。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         js_file = Path(tmp) / "inline.js"
         js_file.write_text(script, encoding="utf-8")
         proc = subprocess.run(
@@ -679,7 +683,8 @@ def main() -> int:
     # 门禁会自己设 AIRNAV_AUDIT_DIR（指到它的 scratch），那时以门禁的为准。
     owned_scratch = None
     if not os.environ.get("AIRNAV_AUDIT_DIR"):
-        owned_scratch = tempfile.TemporaryDirectory()
+        # 同上：清理失败不该把自检判红（§十三 13.18）
+        owned_scratch = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         os.environ["AIRNAV_AUDIT_DIR"] = owned_scratch.name
 
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level="error")

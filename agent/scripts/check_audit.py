@@ -216,7 +216,7 @@ def layer_4_artifacts_and_redaction() -> int:
     print("\n[4] 产物指纹与脱敏")
     failures = 0
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         blob = Path(tmp) / "viewer_selfcheck_c3.html"
         blob.write_bytes(b"<html>viewer payload</html>")
         record = audit.record_run(
@@ -284,7 +284,7 @@ def layer_5_never_break_the_flow() -> int:
     print("\n[5] 观测层不得弄坏主流程")
     failures = 0
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         blocker = Path(tmp) / "not-a-dir.txt"
         blocker.write_text("x", encoding="utf-8")
         previous = os.environ.get("AIRNAV_AUDIT_DIR")
@@ -345,7 +345,7 @@ def layer_6_query() -> int:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         os.environ["AIRNAV_AUDIT_DIR"] = tmp
         print("=" * 68)
         print("AirNav-Agent 审计日志自检（临时目录，不碰 outputs/audit/）")
