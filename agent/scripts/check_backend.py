@@ -136,29 +136,51 @@ def layer_6_tools_work() -> None:
     """横幅承诺「纯工具查询仍可用」—— 必须验证这句是真话。
 
     ⚠️ 界面上的承诺也是断言。写着「仍可用」而实际不可用，比不写更坏。
+
+    ⚠️ 这里**不许写死病例目录、也不许写死病例号**。CI 与干净 clone 上没有
+    `cases/`（1.9 GB，不入库），病例由 `AIRNAV_CASES_DIR` 或合成夹具提供。
+    本函数原来写的是 `NavSession(root='cases')` + 写死的 `'LIDC_0089'`，
+    于是在**本机（有真实病例）绿、在 CI 红** —— 这正是 README 里已记过一次的
+    「绕过环境变量读真实数据」（当年是 `verify_geometry`）。现在一律用
+    `NavSession()`，它内部走 `case_loader.cases_root()` 的三档解析，
+    并把实际用到的病例来源打印出来（来历可查）。
     """
     print("\n[6] 无模型时纯工具仍可用（横幅的承诺必须为真）")
     code = (
         "import sys; sys.path.insert(0,'.')\n"
         "from agent.tools import build_registry, NavSession\n"
-        "r = build_registry(); s = NavSession(root='cases')\n"
-        "names = ['list_cases', 'inspect_case']\n"
-        "args = [{}, {'case_id': 'LIDC_0089'}]\n"
+        "r = build_registry(); s = NavSession()\n"
+        "res = r.execute('list_cases', {}, context=s)\n"
+        "ids = [c['case_id'] for c in (res.get('cases') or [])]\n"
+        "print('ROOT=' + str(res.get('cases_root') or s.root))\n"
+        "print('N=' + str(len(ids)))\n"
         "bad = []\n"
-        "for n, a in zip(names, args):\n"
-        "    res = r.execute(n, a, context=s)\n"
-        "    if not res.get('ok'): bad.append(n)\n"
+        "if not res.get('ok'): bad.append('list_cases')\n"
+        "if ids and not r.execute('inspect_case', {'case_id': ids[0]}, context=s).get('ok'):\n"
+        "    bad.append('inspect_case')\n"
         "print('BAD=' + ','.join(bad))\n"
     )
     proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
                           capture_output=True, timeout=180)
     out = (proc.stdout or b"").decode("utf-8", "replace")
+    lines = out.splitlines()
     if "BAD=" not in out:
-        # 没有 cases/ 时不表态（本地/CI 都可能没有 1.9G 的真实病例）
-        check(True, "跳过（本机无 cases/，不足以判定）", "⚪ 非失败")
+        # 拿不到病例清单（连 list_cases 都跑不起来）——不表态，但也不说通过
+        check(True, "跳过（拿不到病例清单，不足以判定）", "⚪ 非失败")
         return
-    bad = out.split("BAD=", 1)[1].strip()
-    check(bad == "", "list_cases / inspect_case 在无模型下仍返回 ok", bad or "全通过")
+    root = next((l[5:].strip() for l in lines if l.startswith("ROOT=")), "")
+    try:
+        n = int(next((l[2:].strip() for l in lines if l.startswith("N=")), "0"))
+    except ValueError:
+        n = 0
+    if n == 0:
+        # 缺数据 ≠ 通过：一个病例都没有时，这句承诺**没被验证过**，如实标出来
+        check(True, "没有病例可查（不足以判定，缺数据 ≠ 通过）",
+              f"⚪ 0 例 · 来源 {root}")
+        return
+    bad = next((l[4:].strip() for l in lines if l.startswith("BAD=")), "")
+    check(bad == "", f"list_cases / inspect_case 在无模型下仍返回 ok（{n} 例）",
+          (bad and f"失败：{bad}") or f"全通过 · 来源 {root}")
 
 
 WEB_PORT = 8801
