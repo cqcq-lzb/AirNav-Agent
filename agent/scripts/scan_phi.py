@@ -29,6 +29,7 @@
 |---|---|
 | NIfTI（`.nii` / `.nii.gz`） | 头部 4 个**自由文本槽**：`descrip[80]` / `aux_file[24]` / `intent_name[16]` / `db_name[18]` |
 | 文本（`.json` / `.csv` / `.txt`） | 键名（DICOM 标准 PHI 词汇）与值（高置信度模式） |
+| 文本（`.md`） | ⚠️ **只跑值级模式**。文档天然要引用 DICOM 标签名（「JSON 写 `patient_id`、DICOM 写 `PatientID`」），对它跑键名只会产出**自我引用型误报** —— 2026-09-30 实测 4 处，全部来自 `使用指南.md` 里讲解本扫描器规则的那一段。真值（手机号 / 身份证 / 「姓名：张三」）在文档里出现仍然要报 |
 | DICOM（`.dcm`） | 标准 PHI 标签（本系统当前没有，但守卫要能接住将来出现的） |
 
 NIfTI 走**字节级解析**而不是 SimpleITK：头部布局是固定的，直接按偏移读文本槽，
@@ -120,7 +121,14 @@ _PATIENT_FAMILY_RE = re.compile(r"\bpatient[_\s-]?\w+\b", re.I)
 
 # 值级高置信度模式。**只在能承载自由文本的位置里使用**（见模块文档纪律 2）。
 VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("中文姓名（跟在「姓名/患者/病人」后）", re.compile(r"(?:患者|病人|姓名)[:：\s]*[\u4e00-\u9fa5]{2,4}")),
+    # ⚠️ 必须**至少有一个冒号分隔符**。原写法 `[:：\s]*` 允许 0 个分隔符 →
+    # 于是「病人该不该做」被判成姓名「病人该不该」、「患者信息」被判成「患者信息」，
+    # 实测在仓库文本上虚报 61 处（2026-09-30，扫 git archive HEAD 的公开副本时发现）。
+    # 取舍：放弃「患者张三于…」这种无分隔符形态 —— 它与普通句子在字面上**无法区分**；
+    # 而结构化形态（本行 + 下一条 `patient_name=X`）已覆盖真正的泄露主渠道
+    # （DICOM 标签值 / 「标签：值」文本）。见自证里的双向用例。
+    ("中文姓名（「姓名/患者/病人」+ 冒号后的 2~4 字）",
+     re.compile(r"(?:患者|病人|姓名)\s*[:：]\s*[\u4e00-\u9fa5]{2,4}")),
     ("身份证号", re.compile(r"\b\d{17}[\dXx]\b")),
     ("手机号", re.compile(r"\b1[3-9]\d{9}\b")),
     ("邮箱", re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")),
@@ -296,9 +304,17 @@ def scan_text(path: Path, report: Report) -> None:
     report.scanned["text"] = report.scanned.get("text", 0) + 1
 
     # 纪律 1：键名用带边界的完整词匹配，绝不用 age/sex/id 这类短词做子串
-    for match in PHI_KEY_RE.finditer(text):
-        line = text[:match.start()].count("\n") + 1
-        report.add(path, f"第 {line} 行键名", match.group(0))
+    #
+    # ⚠️ 例外：**`.md` 不跑键名扫描**（2026-09-30 补）。文档天然要引用 DICOM 标签名
+    # —— 「JSON 写 `patient_id`、DICOM 写 `PatientID`、CSV 表头写 `Patient ID`」
+    # 这种句子在讲解标准时是**合法**的，扫它只会产出自我引用型误报
+    # （实测 4 处，全部来自一篇讲解本扫描器规则的文档，即 `使用指南.md`）。
+    # 值级模式仍然照跑 —— 文档里出现真的手机号 / 身份证 / 「姓名：张三」就是真泄露。
+    # 判据与「被检索的标记会不会合法地出现在别处」同族：**钉形态，不钉「出现过」**。
+    if path.suffix.lower() != ".md":
+        for match in PHI_KEY_RE.finditer(text):
+            line = text[:match.start()].count("\n") + 1
+            report.add(path, f"第 {line} 行键名", match.group(0))
     _log_exemptions(text, path, report)
 
     # 纪律 2：值级模式只跑在有界上下文里
@@ -479,6 +495,29 @@ def selftest() -> int:
         fp2 = base / "clean.nii.gz"
         _write_nifti_with_phi(fp2, "")
         run("误报 ②：干净的 NIfTI（descrip 为空）→ 必须不命中", fp2, False)
+
+        # ---- 中文姓名规则：必须有「冒号」，否则与普通句子在字面上无法区分 ----
+        # 这一对是 2026-09-30 补的。此前这条规则**没有正反用例**，所以它把
+        # 「病人该不该做」判成姓名、在仓库文本上虚报 61 处，**没有任何断言会叫**。
+        # 教训：凡「识别类规则」都要成对测 —— 挡得住（漏报）与放得行（虚报）各一条。
+        name_pos = base / "name_pos.txt"
+        name_pos.write_text("患者姓名：张三\n", encoding="utf-8")
+        run("姓名规则 ①（挡得住）：「姓名：张三」→ 必须命中", name_pos, True)
+
+        name_neg = base / "name_neg.txt"
+        name_neg.write_text(
+            "病人该不该做手术，取决于患者信息、患者的具体临床情况，"
+            "以及患者可识别信息是否已被清除。\n", encoding="utf-8")
+        run("姓名规则 ②（放得行）：普通句子里的「病人/患者」→ 必须不命中", name_neg, False)
+
+        # ---- `.md` 例外：文档引用标签名合法，但文档里的真值仍要报 ----
+        md_ref = base / "doc.md"
+        md_ref.write_text("DICOM 写 `PatientID`，JSON 写 `patient_id`。\n", encoding="utf-8")
+        run("`.md` 例外 ①（放得行）：文档引用 DICOM 标签名 → 必须不命中", md_ref, False)
+
+        md_val = base / "doc2.md"
+        md_val.write_text("联系电话：13812345678\n", encoding="utf-8")
+        run("`.md` 例外 ②（挡得住）：文档里出现真手机号 → 必须命中", md_val, True)
 
         # ---- 清除路径必须在合成数据上跑通闭环 ----
         total[0] += 1
