@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from agent.core import geometry  # noqa: E402
-from agent.core.sysmem import available_bytes as _sysmem_available_bytes  # noqa: E402
+from agent.core.sysmem import read_memory as _sysmem_read_memory  # noqa: E402
 
 CASE_ID = "LIDC_0089"
 SAMPLE_POINTS = 200_000
@@ -64,7 +64,17 @@ EDT_SAFETY = 1.3      # 安全余量：EDT 内部除特征数组外还有输入�
 
 
 def _available_bytes() -> int | None:
-    """当前可用物理内存（字节）。取不到返回 None（＝不知道，不拦）。
+    """**还能安全申请多少连续内存**（字节）。取不到返回 None（＝不知道，不拦）。
+
+    🔴 注意这**不是**「可用物理内存」，而是 `min(可用物理, 可用提交)`。
+
+    2026-09-30 实测：物理 **31.7 GB**、可用物理 **12.1 GB**，但**已提交 38.9 GB**
+    （超过物理，全靠页文件顶）。此时只看物理就会**放行**，随后 numpy 申请 882 MiB
+    **连续已提交**空间时崩掉（`_ArrayMemoryError`）→ 把「机器腾不出资源」写成了 ❌。
+
+    这正是本模块上面注释里说的「上一轮就是这样，害得以为发生了回归」的**同一个病根**
+    ——  区别只是它这次在**提交口径**上复发。所以判据统一成「还能申请多少连续内存」，
+    并放在 `sysmem.MemoryReading.headroom_bytes` 一处实现。
 
     读数来自 `agent.core.sysmem` —— 本仓库唯一一份内存读数实现。
     ⚠️ **不要**在这里再抄一份 `ctypes` 结构体：本仓库曾经有三份逐字节相同的
@@ -72,7 +82,7 @@ def _available_bytes() -> int | None:
     只会把数填进错位的字段，于是「可用内存」悄悄变成别的量。
     这层包装是为了让测试能替换本函数（monkeypatch `_available_bytes`）。
     """
-    return _sysmem_available_bytes()
+    return _sysmem_read_memory().headroom_bytes
 
 
 def _edt_memory_need(size: int) -> int:

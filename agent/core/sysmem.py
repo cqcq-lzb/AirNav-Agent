@@ -60,6 +60,13 @@ class MemoryReading:
     total_phys: int | None = None
     available_phys: int | None = None
     committed: int | None = None
+    # 🔴 **可用提交**（页文件还能扩多少）—— 与 `available_phys` 是**两个不同的上限**。
+    # 2026-09-30 实测踩的坑：物理 31.7 GB、可用物理 12.1 GB，但**已提交 38.9 GB**
+    # （超过物理，全靠页文件顶）。此时要 882 MiB **连续已提交**空间的 numpy 分配
+    # 照样失败（`_ArrayMemoryError`），而「可用物理」看着还剩 12 GB ——
+    # 于是守卫放行、真分配时崩掉，把「机器腾不出资源」写成了 ❌（＝回归）。
+    # 判据：**申请连续大块内存时，看 `min(available_phys, available_commit)`**。
+    available_commit: int | None = None
     source: str = "unavailable"
 
     @property
@@ -69,6 +76,20 @@ class MemoryReading:
     @property
     def committed_mib(self) -> float | None:
         return None if self.committed is None else self.committed / MIB
+
+    @property
+    def available_commit_mib(self) -> float | None:
+        return None if self.available_commit is None else self.available_commit / MIB
+
+    @property
+    def headroom_bytes(self) -> int | None:
+        """**还能安全申请多少连续内存** = min(可用物理, 可用提交)。
+
+        申请大块连续内存时要看这个，而不是只看 `available_phys` —— 见字段注释。
+        两者任一取不到就退回另一个（不知道的那一侧不参与限制）。
+        """
+        candidates = [v for v in (self.available_phys, self.available_commit) if v is not None]
+        return min(candidates) if candidates else None
 
 
 def _read_windows() -> MemoryReading | None:
@@ -83,6 +104,7 @@ def _read_windows() -> MemoryReading | None:
         total_phys=int(status.ullTotalPhys),
         available_phys=int(status.ullAvailPhys),
         committed=int(status.ullTotalPageFile - status.ullAvailPageFile),
+        available_commit=int(status.ullAvailPageFile),
         source="GlobalMemoryStatusEx",
     )
 
@@ -106,6 +128,7 @@ def _read_linux() -> MemoryReading | None:
         total_phys=got.get("total"),
         available_phys=got["avail"],
         committed=None,          # Linux 侧没有等价物（要看得另读 /proc/self/status）
+        available_commit=None,   # 同上；Linux 的提交口径是 CommitLimit − Committed_AS
         source="/proc/meminfo",
     )
 

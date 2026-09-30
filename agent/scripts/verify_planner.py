@@ -17,10 +17,13 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.core.case_loader import load_case  # noqa: E402
 from agent.core.planner import plan_candidate  # noqa: E402
+from agent.core.sysmem import read_memory as _sysmem_read_memory  # noqa: E402
 
 # 参与比对的数值型指标
 METRIC_KEYS = [
@@ -57,6 +60,54 @@ def diff(expected: dict, actual: dict, keys: list[str]) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------- 内存预算
+#
+# `compare_with_baseline` 会在**整卷** airway 掩膜上做 skeletonize + 形态学膨胀，
+# 峰值时同时持有若干份 `shape_zyx` 大小的数组。
+#
+# ⚠️ 为什么要**提前探**而不是 `except MemoryError` 兜住真正的失败：
+#   那会让「机器腾不出内存」与「规划实现漂了」走进同一个分支，于是一次偶发的
+#   环境抖动被写成 ❌。2026-09-30 就是这么误判的 —— 门禁报 geometry / planner 两项 ❌，
+#   实际两处都是 `_ArrayMemoryError`（882 MiB / 36.8 MiB），而那一刻的读数极具迷惑性：
+#   **可用物理还剩 12.5 GB，可用提交只剩 0.4 GB**。
+#   `verify_geometry` 上一轮踩的是同一个病根，只是那次在物理口径上复发。
+#   反过来把它写成 ✅ 更糟。所以：分配前先探一块，探不到就明确报 ⚪。
+
+PLANNER_SLOTS = 4        # 峰值时同时在世的整卷数组份数（掩膜 / 膨胀 / 骨架 / 坐标）
+PLANNER_SAFETY = 1.5     # 安全余量
+PROBE_PAGE = 4096        # 逐页触碰的步长
+
+# `load_case` 的**保守**门槛 —— 它必须做在加载之前（拿不到 case 就算不出确切需求）。
+# 实测 shape (147, 512, 512)：CT int16 整卷 ≈77 MB，若干份 bool 掩膜每份 36.8 MB，
+# 再加 SimpleITK 与 numpy 之间的拷贝 —— 峰值估计 ≈0.6 GB，取 1 GB 作为「低于此值别开始」。
+# ⚠️ 2026-09-30 实测教训：门槛设 256 MB 时**放行了但照样崩**（当时余量 0.47 GB），
+# 因为 `load_case` 的真实峰值是 CT + 多份掩膜叠加，不是单个 36.8 MB 数组。
+LOAD_HEADROOM_MIN = 1024 * 2**20
+
+
+def _planner_memory_need(size: int) -> int:
+    """整卷规划一次的峰值内存估算（字节）。
+
+    宁可多报 ⚪ —— 把资源问题记成 ❌ 比多报一次「不足以判定」坏得多。
+    """
+    return int(PLANNER_SAFETY * PLANNER_SLOTS * size)
+
+
+def _try_reserve(nbytes: int) -> bool:
+    """真的申请一块、**逐页触碰**、再释放。取不到返回 False。
+
+    ⚠️ **必须逐页触碰**：`np.empty` 只保留虚拟地址；不写一遍的话，
+    「虚拟地址申请到了」会被误当成「提交得出来」—— 而这正是本次要防的那件事。
+    """
+    try:
+        probe = np.empty(nbytes, dtype=np.uint8)
+        probe[::PROBE_PAGE] = 0
+        del probe
+        return True
+    except (MemoryError, ValueError):
+        return False
+
+
 def _default_case_dir() -> str:
     """挑一个可用的病例目录（优先 LIDC_0089，否则取第一个）。
 
@@ -85,6 +136,20 @@ def main() -> int:
         args.case_dir = _default_case_dir()
 
     case_dir = Path(args.case_dir).resolve()
+
+    # ⚠️ 这一道必须在 `load_case` **之前** —— 病例加载自己就会在整卷上建若干份数组
+    # （CT int16 整卷 + 多份 bool 掩膜 + SimpleITK→numpy 拷贝），2026-09-30 实测
+    # 它正是在 `airway_baseline = array > 0` 这一步抛 `_ArrayMemoryError`。
+    # 那时还没拿到 case，算不出确切需求，所以用保守门槛。判据是**提交**不是**物理**：
+    # 那一刻可用物理还剩 12.5 GB，可用提交只剩 0.4 GB。
+    if not _try_reserve(LOAD_HEADROOM_MIN):
+        print(f"⚪ 探不到 {LOAD_HEADROOM_MIN / 2**20:,.0f} MB 连续可提交内存 —— 本项**不足以判定**")
+        print("   病例加载本身就要建起 CT 与多份整卷掩膜，这不是规划实现的问题，")
+        print("   是这台机器此刻的**可用提交**不足（注意：可用物理可能还剩很多）。")
+        print("   补齐：关掉占内存的进程（浏览器 / Docker / 其它 python）后单跑：")
+        print("     python -m agent.scripts.verify_planner")
+        return 2
+
     case = load_case(case_dir)
 
     print("=" * 72)
@@ -103,6 +168,23 @@ def main() -> int:
         )
 
     plans: dict[int, dict] = {}
+    baseline = getattr(case, "airway_baseline_mask", None)
+    if baseline is not None:
+        need = _planner_memory_need(int(baseline.size))
+        reading = _sysmem_read_memory()
+        now = reading.headroom_bytes
+        print(
+            f"\n  内存预算：整卷规划峰值 ≈{need / 2**20:,.0f} MB"
+            f"（shape {tuple(baseline.shape)}，{baseline.size:,} 体素 × {PLANNER_SLOTS} 份）"
+            f"；当前可申请 {('%.0f MB' % (now / 2**20)) if now else '未知'}"
+            f"（取「物理可用 / 提交可用」的较小者）"
+        )
+        if not _try_reserve(need):
+            print(f"  ⚪ 探不到 {need / 2**20:,.0f} MB 连续可提交内存 —— 本项**不足以判定**")
+            print("     这不是规划实现的问题，是这台机器此刻腾不出整卷规划的内存。")
+            print("     补齐：关掉占内存的进程（浏览器 / 其它 python / Docker）后单跑：")
+            print("       python -m agent.scripts.verify_planner")
+            return 2
     print("\n规划中……")
     for item in case.candidates:
         try:
