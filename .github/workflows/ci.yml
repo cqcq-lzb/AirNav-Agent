@@ -4,9 +4,9 @@ name: regression gate
 #
 # ⚠️ 已知边界（别假装没有）：
 #   1. `cases/`（1.9GB 真实病例）**不入库**（隐私 + 体积，见 .gitignore）。
-#      → 已解决：仓库自带**合成夹具** `fixtures/cases`（24.4 KB/例，见
+#      → 已解决：仓库自带**合成夹具** `fixtures/cases`（26 KB/例，实测 26730 B，见
 #        `docs/合成夹具.md`）。case_loader 在真实病例缺席时兜底到它，
-#        于是 `--profile ci` 现在跑**全部 13 项**（不再是「不依赖病例的子集」）。
+#        于是 `--profile ci` 现在跑**全部 15 项**（不再是「不依赖病例的子集」）。
 #
 #        ⚠️ 其中 `planner` 会明确报 ⚪「不足以判定」：夹具没有 `interactive_plans/`，
 #        与 V1 GUI 的数值对拍**没做** —— 是「没做」，不是「做对了」。

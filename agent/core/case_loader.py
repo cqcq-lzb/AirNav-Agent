@@ -31,7 +31,7 @@ from .navbridge import choose_entry_node_no_edt, nav
 
 REQUIRED_FILES = ("ct.nii.gz", "airway_mask.nii.gz", "nodule_raw.nii.gz")
 
-# 合成夹具根目录（随仓库入库，体积 ~25KB/例）。
+# 合成夹具根目录（随仓库入库，体积 ~26KB/例，实测 26730 B）。
 # 只在 `<repo>/cases` 缺席时兜底，且来历会被显式标出来 —— 见 cases_root()。
 FIXTURE_ROOT = Path(__file__).resolve().parents[2] / "fixtures" / "cases"
 
