@@ -17,8 +17,9 @@ name: regression gate
 #   2. 评测基线用的是 `heuristic` 规则基线后端：确定性、不联网、不需要 GPU。
 #      真模型评测（gpu41 / qwen2.5:14b）依赖内网与 GPU，留在本地手动跑。
 #
-# 仓库当前没有配置 git remote（`git remote -v` 为空），此文件是为将来接远端准备的；
-# 现在真正在用的是 `跑回归门禁.bat` / `python -m agent.scripts.gate`。
+# 远端：https://github.com/cqcq-lzb/AirNav-Agent （私有）
+# 首次绿色运行 2026-09-30（run 36680366917，7m20s，结论 14 通过 / 0 失败 / 1 不足以判定）。
+# 此后每次 push 到 main 都会自动跑；本地等价入口是 `跑回归门禁.bat`。
 
 on:
   push:
