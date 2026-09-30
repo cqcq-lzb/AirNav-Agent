@@ -38,7 +38,13 @@ if __package__ in (None, ""):
 
 from agent.agent_loop import NavAgent
 from agent.core import cache as cache_mod
-from agent.llm.client import LLMError, OpenAICompatClient, PRESETS
+from agent.llm.client import (
+    LLMError,
+    OpenAICompatClient,
+    PRESETS,
+    degradation_note,
+    probe_backend,
+)
 from agent.tools import NavSession, build_registry
 
 
@@ -299,54 +305,20 @@ def cmd_cache(args: argparse.Namespace) -> int:
     return 0
 
 
-def probe_backend(client) -> dict[str, Any]:
-    """探活 LLM 后端，返回**结构化**结论（而不是只打印一行字）。
-
-    为什么要结构化：模型看不见 stdout。如果降级信息只打在控制台，
-    它既不会改变 Agent 的行为，也不会出现在 `--json` 里 ——
-    下游（评测、报告、网页端）就无从知道「这次回答是在后端不可达时产生的」。
-    所以这里同时给出 `degraded` 字段与一句人话，两边都能消费。
-
-    返回：
-      {"ok": bool, "degraded": bool, "detail": str, "models": [...]}
-      · ok=True            后端可达且目标模型在列表里
-      · degraded=True      后端**不可达**（或目标模型缺失），但流程仍可继续
-    """
-    if not hasattr(client, "health"):
-        # scripted / 回放后端没有网络，天然不算降级
-        return {"ok": True, "degraded": False, "detail": f"{client.label}（本地回放）"}
-
-    health = client.health()
-    if health.get("ok") and health.get("has_target", True):
-        models = health.get("models") or []
-        return {
-            "ok": True, "degraded": False, "models": models,
-            "detail": f"可达，模型 {client.model} 在列（共 {len(models)} 个）",
-        }
-    if health.get("ok"):
-        models = health.get("models") or []
-        return {
-            "ok": False, "degraded": True, "models": models,
-            "detail": f"后端可达，但没有模型 {client.model}"
-                      f"（可用 {len(models)} 个）→ 需要先 ollama pull",
-        }
-    return {
-        "ok": False, "degraded": True, "models": [],
-        "detail": f"后端不可达：{health.get('detail')}",
-    }
-
-
 def print_degradation(probe: dict[str, Any], backend: str) -> None:
-    """把降级状态打成一眼能看懂的横幅。"""
+    """把降级状态打成一眼能看懂的横幅。
+
+    ⚠️ 判据来自 `agent/llm/client.probe_backend`（**只有一份**），
+    这里只负责措辞。网页端用同一个 `degradation_note()`。
+    """
     print("=" * 66)
     print("⚠️  降级运行：推理后端不可用")
     print(f"    {probe['detail']}")
     print("    · 依赖模型判断的步骤会失败；**纯工具查询仍可用**")
     print("      （病例结构、候选列表、几何量、合规报告都不需要模型）")
-    if backend == "gpu41":
-        print("    核实后端是否起来：ssh gpu41 后跑 ~/ollama/start_ollama_gpu41.sh")
-    elif backend == "ollama":
-        print("    本机先启动 Ollama（运行 ollama serve），或换 --backend gpu41")
+    note = degradation_note(probe, backend)
+    if note:
+        print(f"    {note}")
     print("=" * 66)
 
 

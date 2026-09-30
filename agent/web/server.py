@@ -50,7 +50,7 @@ from starlette.routing import Route
 
 from .. import audit
 from ..agent_loop import NavAgent
-from ..llm.client import PRESETS, OpenAICompatClient
+from ..llm.client import PRESETS, OpenAICompatClient, degradation_note, probe_backend
 from ..render.viewer import viewers_dir
 from ..tools import NavSession, build_registry
 from .auth import TokenAuthMiddleware, actor, client_ip, login_page, status_line, user_agent
@@ -134,6 +134,54 @@ def _default_model(backend: str) -> str | None:
     if isinstance(preset, dict):
         return preset.get("model")
     return backend
+
+
+# ------------------------------------------------------------------ 降级探活
+#
+# ⚠️ 为什么 `/health` **不**接后端状态：它是**存活探针**（liveness），
+# 回答的是「这个进程还活着吗」。把推理后端接进去，gpu41 一挂就会让
+# 编排层/健康检查以为**整个服务死了**并重启它 —— 而实际上服务好得很，
+# 只是模型不可用（大量纯工具查询照常能用）。
+# 存活与就绪是两件事，所以降级状态走 `/api/meta`（已鉴权、本来就返回运行时事实）。
+
+#: 探活缓存：(后端, 模型) -> (时间戳, 结论)
+#: 为什么要缓存：`/api/meta` 在页面加载时必被调用。后端挂掉时每次探活都要
+#: 等完整超时 —— 不缓存的话，用户每刷一次页面就白等一次。
+_PROBE_TTL_S = 15.0
+_PROBE_TIMEOUT_S = 2.5
+_probe_cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+
+
+def _backend_probe(backend: str, model: str | None = None, force: bool = False) -> dict[str, Any]:
+    """带缓存的探活。
+
+    ⚠️ 超时故意取短（2.5s，CLI 那条路是 8s）：网页首屏不该为一个
+    可能永远不来的响应干等。宁可**保守地报降级**，也不让页面卡住 ——
+    报错的代价是提示不准，卡住的代价是用户以为服务坏了。
+    """
+    key = (backend, model)
+    now = time.time()
+    if not force:
+        cached = _probe_cache.get(key)
+        if cached and (now - cached[0]) < _PROBE_TTL_S:
+            return cached[1]
+
+    try:
+        client = _make_client(backend, model)
+    except Exception as error:  # noqa: BLE001 - 配置错也要变成「降级」而不是 500
+        result = {
+            "ok": False, "degraded": True, "models": [],
+            "detail": f"后端构造失败：{type(error).__name__}: {error}",
+        }
+    else:
+        result = probe_backend(client, timeout=_PROBE_TIMEOUT_S)
+
+    result = dict(result)
+    result["backend"] = backend
+    result["note"] = degradation_note(result, backend)
+    result["checked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _probe_cache[key] = (now, result)
+    return result
 
 
 def _collect_artifacts(session: NavSession) -> list[dict[str, Any]]:
@@ -243,6 +291,8 @@ async def api_meta(request) -> JSONResponse:
             "default_backend": DEFAULT_BACKEND,
             "backend_labels": labels,
             "viewer_dir": str(_viewers_dir()),
+            # 降级状态：前端加载时就能显示横幅，不必等第一次提问失败才知道
+            "backend_probe": _backend_probe(DEFAULT_BACKEND),
         }
     )
 
@@ -304,7 +354,17 @@ async def api_chat(request) -> Any:
         items: list[dict[str, Any]] = []
         verdict = "error"
         error_text: str | None = None
+        # ⚠️ 必须在 try 之前初始化：`finally` 里要引用它写审计，
+        # 而探活本身也可能在极端情况下先炸 —— 那时它就是 unbound（NameError）。
+        probe: dict[str, Any] | None = None
         try:
+            # 先探活再跑：把降级状态**作为第一条 SSE 事件**推给前端。
+            # ⚠️ 顺序有意义 —— 若等到最后再说「其实后端不可用」，用户已经把
+            # 那句「连接失败」当成结论读了。先声明降级，回答才不会被误读。
+            probe = _backend_probe(backend, model)
+            if probe.get("degraded"):
+                push({"type": "degraded", "probe": probe})
+
             session = NavSession(
                 root=cases_root,
                 device_diameter_mm=device_diameter,
@@ -364,6 +424,11 @@ async def api_chat(request) -> Any:
                     "recovered_toolcalls": (
                         run.recovered_toolcalls if run is not None else None
                     ),
+                    # 降级状态进审计：这样报告/评效能区分「答错了」与
+                    # 「当时后端根本不在」。⚠️ 走 `params` 而不是新增顶层字段 ——
+                    # 审计是哈希链，动 schema 要有迁移，放 params 零风险。
+                    "degraded": bool(probe.get("degraded")) if probe else None,
+                    "degraded_detail": (probe or {}).get("detail") if probe else None,
                 },
                 steps=_audit_steps(run),
                 artifacts=items,

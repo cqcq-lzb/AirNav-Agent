@@ -282,13 +282,18 @@ class OpenAICompatClient:
             raw=data,
         )
 
-    def health(self) -> dict[str, Any]:
-        """探活：拉一次模型列表，用于判断本地服务是否已启动。"""
+    def health(self, timeout: float = 8.0) -> dict[str, Any]:
+        """探活：拉一次模型列表，用于判断本地服务是否已启动。
+
+        ⚠️ `timeout` 必须可调：CLI 的 `doctor` 可以等 8 秒，
+        但**网页端首屏加载不能等 8 秒** —— 后端挂掉时页面会先卡住。
+        调用方按场景给（web 用短超时，CLI 用默认）。
+        """
         try:
             response = self._session.get(
                 f"{self.base_url}/models",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=8,
+                timeout=timeout,
             )
             if response.status_code != 200:
                 return {"ok": False, "detail": f"HTTP {response.status_code}"}
@@ -355,8 +360,74 @@ class ScriptedClient:
             return item(messages)
         return item
 
-    def health(self) -> dict[str, Any]:
+    def health(self, timeout: float = 8.0) -> dict[str, Any]:  # noqa: ARG002 - 本地回放无网络
         return {"ok": True, "models": [self.label], "has_target": True}
+
+
+# ------------------------------------------------------------------ 降级判据
+#
+# ⚠️ 这段判据**只有一份**，CLI（`agent/cli.py`）与网页端（`agent/web/server.py`）
+# 都从这里取。为什么不让两边各写一份：判据一分裂，就会出现
+# 「CLI 说降级、网页说正常」这种自相矛盾的状态，而且改一边忘一边。
+
+
+def probe_backend(client: Any, timeout: float = 8.0) -> dict[str, Any]:
+    """探活 LLM 后端，返回**结构化**结论（而不是只打印一行字）。
+
+    为什么要结构化：模型看不见 stdout。如果降级信息只打在控制台，
+    它既不会改变 Agent 的行为，也不会出现在 `--json` / `/api/meta` 里 ——
+    下游（评测、报告、网页端）就无从知道「这次回答是在后端不可达时产生的」。
+
+    返回：
+      {"ok": bool, "degraded": bool, "detail": str, "models": [...]}
+      · ok=True        后端可达且目标模型在列表里
+      · degraded=True  后端**不可达**（或目标模型缺失），但流程仍可继续
+
+    ⚠️ `scripted` / 回放后端没有网络，**天然不算降级** ——
+    它的 `health()` 恒返回 ok。这是有意的：回放后端本来就用于
+    「无网络时验证工具链路」，把它判成降级会误导。
+    """
+    health_fn = getattr(client, "health", None)
+    if health_fn is None:
+        return {"ok": True, "degraded": False, "detail": f"{client.label}（无 health 接口）"}
+
+    # ⚠️ `model` 不是所有后端都有 —— `ScriptedClient` / `HeuristicClient` 只有 `label`。
+    # 直接用 `client.model` 会 AttributeError（实测踩过：scripted 后端一探活就炸）。
+    # 回退到 label；再没有就给个占位，**信息缺失不该让探活本身失败**。
+    target = getattr(client, "model", None) or getattr(client, "label", "(未知模型)")
+
+    health = health_fn(timeout=timeout)
+    if health.get("ok") and health.get("has_target", True):
+        models = health.get("models") or []
+        return {
+            "ok": True, "degraded": False, "models": models,
+            "detail": f"可达，模型 {target} 在列（共 {len(models)} 个）",
+        }
+    if health.get("ok"):
+        models = health.get("models") or []
+        return {
+            "ok": False, "degraded": True, "models": models,
+            "detail": f"后端可达，但没有模型 {target}"
+                      f"（可用 {len(models)} 个）→ 需要先 ollama pull",
+        }
+    return {
+        "ok": False, "degraded": True, "models": [],
+        "detail": f"后端不可达：{health.get('detail')}",
+    }
+
+
+def degradation_note(probe: dict[str, Any], backend: str) -> str:
+    """给界面用的一句**可执行提示**（不含判据，判据在 `probe_backend`）。
+
+    ⚠️ 只返回「该怎么办」，**不重复**「会失败 / 仍可用」那类描述 ——
+    各端自己已经有横幅说明，重复一遍是纯粹的噪声。
+    """
+    if not probe.get("degraded"):
+        return ""
+    return {
+        "gpu41": "核实后端：ssh gpu41 后跑 ~/ollama/start_ollama_gpu41.sh",
+        "ollama": "本机先启动 Ollama（ollama serve），或改选 gpu41 后端",
+    }.get(backend, "请检查推理后端是否已启动")
 
 
 def _is_local_url(url: str) -> bool:
@@ -375,4 +446,6 @@ __all__ = [
     "PRESETS",
     "ScriptedClient",
     "ToolCallRequest",
+    "degradation_note",
+    "probe_backend",
 ]

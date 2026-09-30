@@ -53,6 +53,16 @@
   .dead-ref{display:inline-block;margin:4px 2px;padding:3px 9px;border-radius:6px;
     background:var(--warn-bg);border:1px solid #f0d9b0;color:var(--warn);font-size:12px}
 
+  /* 降级横幅。⚠️ 用 warn 不用 bad：「降级」不等于「服务坏了」—— 纯工具查询
+     照常能用，标成红色会让人以为整站挂了。等级要配得上事实。 */
+  #degraded{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
+    padding:8px 18px;background:var(--warn-bg);border-bottom:1px solid #f0d9b0;
+    color:var(--warn);font-size:12px}
+  /* ⚠️ 必须显式写这条：上面设了 `display:flex`，会把 `hidden` 属性自带的
+     `display:none` 覆盖掉 —— 结果就是「加了 hidden 却照样显示」。 */
+  #degraded[hidden]{display:none}
+  #degraded .why{color:var(--tx-3);font:11px/1.5 var(--mono);word-break:break-all}
+
   .runbox{align-self:flex-start;width:min(760px,92%);display:flex;flex-direction:column;gap:6px}
   .step{font-size:11px;color:var(--tx-3);letter-spacing:.4px;margin-top:2px}
 
@@ -156,6 +166,16 @@
   </label>
   <span id="status"></span>
 </header>
+
+<!--
+  降级横幅：推理后端不可用时显示。默认 hidden —— 只有 /api/meta 或 SSE 明确
+  说 degraded 时才亮。前端不猜状态，只显示服务端给的结论。
+-->
+<div id="degraded" hidden>
+  <b>⚠️ 降级运行：推理后端不可用</b>
+  <span id="degraded-note"></span>
+  <span class="why" id="degraded-why"></span>
+</div>
 
 <main>
   <section class="chat">
@@ -342,6 +362,19 @@
   }
   function scrollDown(){ log.scrollTop = log.scrollHeight; }
 
+  // ---------- 降级提示 ----------
+  // 判据全部来自服务端（/api/meta 的 backend_probe 或 SSE 的 degraded 事件）。
+  // 前端**不自己探**后端通不通：猜出来的状态会和 CLI / 审计记录对不上，
+  // 而「同一件事两处说法不同」比没有提示更坏。
+  function showDegraded(probe){
+    const el = $("degraded");
+    if (!el) return;
+    if (!probe || !probe.degraded){ el.hidden = true; return; }
+    $("degraded-note").textContent = probe.note || "依赖模型判断的步骤会失败。";
+    $("degraded-why").textContent = probe.detail || "";
+    el.hidden = false;
+  }
+
   // ---------- 鉴权 ----------
   // 一律以服务端返回的 401 为准，不在前端猜「有没有登录」—— 前端没有可信的
   // 登录态来源（Cookie 是 HttpOnly 的，脚本读不到）。这也是设计上想要的：
@@ -371,6 +404,8 @@
   }).then(meta => {
     if (!meta) return;   // 未登录：留在登录浮层上，不再往下初始化
     backendDefault = meta.default_backend;
+    // 页面一加载就把降级状态显示出来 —— 不必等第一次提问失败才知道
+    showDegraded(meta.backend_probe);
     const sel = $("backend");
     sel.innerHTML = "";
     meta.backends.forEach(b => {
@@ -530,6 +565,13 @@
       let d;
       try { d = JSON.parse(ev.data); } catch (e) { return; }
       switch (d.type){
+        case "degraded":
+          // 后端不可用时这是**第一条**事件：先声明降级，回答才不会被误读成
+          // 「这个病例真的没路径」。顺序本身就是信息。
+          showDegraded(d.probe);
+          traceRow("f", "", "后端降级");
+          break;
+
         case "start":
           traceRow("a", "", "后端 " + d.backend);
           break;

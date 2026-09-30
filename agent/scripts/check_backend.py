@@ -48,14 +48,19 @@ def check(ok: bool, label: str, detail: str = "") -> bool:
 
 
 class _StubClient:
-    """带 health() 的最小桩，用来构造「可达 / 不可达」两种状态。"""
+    """带 health() 的最小桩，用来构造「可达 / 不可达」两种状态。
+
+    ⚠️ `health` 必须接受 `timeout` 关键字 —— 真实客户端（`OpenAICompatClient`
+    / `ScriptedClient`）都是这个签名，桩对不上的话，
+    `probe_backend` 一调用就 TypeError（本自检第一次跑就抓到了这个）。
+    """
 
     def __init__(self, health: dict, model: str = "qwen2.5:14b", label: str = "stub"):
         self._health = health
         self.model = model
         self.label = label
 
-    def health(self) -> dict:
+    def health(self, timeout: float = 8.0) -> dict:  # noqa: ARG002 - 桩不看超时
         return self._health
 
 
@@ -156,6 +161,126 @@ def layer_6_tools_work() -> None:
     check(bad == "", "list_cases / inspect_case 在无模型下仍返回 ok", bad or "全通过")
 
 
+WEB_PORT = 8801
+WEB_BASE = f"http://127.0.0.1:{WEB_PORT}"
+WEB_DEAD_URL = "http://203.0.113.98:11434/v1"
+
+
+def layer_7_web_degraded() -> None:
+    """网页端：降级状态必须到得了界面，而 `/health` 必须**不受**后端影响。
+
+    ⚠️ 为什么这条特别重要（本层的真正价值）：把推理后端接进 `/health`
+    是鉴权/健康检查类改动里最常见的自伤 —— 后端一挂，编排层就会以为
+    **整个服务死了**并重启它，而其实服务好得很（纯工具查询照常能用）。
+    所以这里同时验「挡住的」（降级能报出来）与「放行的」（`/health` 不被牵连）。
+    """
+    print("\n[7] 网页端：降级横幅到得了界面，/health 不被牵连")
+
+    import os
+    import threading
+    import time
+    import urllib.parse
+    import urllib.request
+
+    # 指向必然连不上的地址（RFC 5737 保留段）。必须在起服务**之前**设，
+    # 且要清掉探活缓存 —— 否则会命中上一层留下的 gpu41 结论。
+    os.environ["AIRNAV_GPU41_URL"] = WEB_DEAD_URL
+    os.environ["AIRNAV_WEB_PORT"] = str(WEB_PORT)
+
+    try:
+        import uvicorn
+
+        from agent.web import server as web_server
+    except Exception as error:  # noqa: BLE001
+        check(False, "agent.web.server 可导入", f"{type(error).__name__}: {error}")
+        return
+
+    web_server._probe_cache.clear()
+
+    # 反向用例：可达后端（heuristic 不需要网络）不许报降级。
+    # 没有这条，一个「永远返回 degraded=True」的实现也能通过全部断言。
+    healthy = web_server._backend_probe("heuristic")
+    check(healthy["degraded"] is False, "反向：heuristic 不报降级",
+          f"degraded={healthy['degraded']}")
+
+    # 审计落临时目录，别污染 outputs/audit/
+    import tempfile
+    scratch = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    os.environ["AIRNAV_AUDIT_DIR"] = scratch.name
+
+    config = uvicorn.Config(web_server.app, host="127.0.0.1", port=WEB_PORT,
+                            log_level="error")
+    server = uvicorn.Server(config)
+    # opener 必须禁代理：本机 `http_proxy` 会把 127.0.0.1 也代理掉，
+    # 表现成「连接被拒」，看起来像服务没起来（实测踩过）。
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def probe(path: str, timeout: int = 20) -> tuple[int, str]:
+        try:
+            with opener.open(WEB_BASE + path, timeout=timeout) as response:
+                return response.status, response.read().decode("utf-8", "replace")
+        except Exception as error:  # noqa: BLE001
+            return 0, f"{type(error).__name__}: {error}"
+
+    thread = threading.Thread(target=server.run, name="check-backend-web", daemon=True)
+    thread.start()
+    ready = False
+    for _ in range(40):
+        status, _body = probe("/health", timeout=3)
+        if status == 200:
+            ready = True
+            break
+        time.sleep(0.3)
+
+    try:
+        if not check(ready, "网页服务就绪"):
+            return
+
+        # ① /health 是存活探针：后端死不死都得是 ok
+        status, body = probe("/health")
+        check(status == 200 and body.strip() == "ok",
+              "/health 不受后端影响（存活 ≠ 就绪）", f"{status} {body.strip()[:20]}")
+
+        # ② /api/meta 必须把降级状态交出来
+        status, body = probe("/api/meta", timeout=30)
+        try:
+            meta = json.loads(body)
+        except json.JSONDecodeError as error:
+            check(False, "/api/meta 返回 JSON", str(error)[:60])
+            return
+        bprobe = meta.get("backend_probe")
+        check(isinstance(bprobe, dict), "/api/meta 含 backend_probe")
+        if isinstance(bprobe, dict):
+            check(bprobe.get("degraded") is True, "backend_probe.degraded 为 True")
+            check(bool(bprobe.get("detail")), "带上不可达原因")
+            check(bool(bprobe.get("note")), "带上可执行提示（note）")
+            check(bprobe.get("backend") == web_server.DEFAULT_BACKEND,
+                  "标注是哪个后端的结论")
+
+        # ③ SSE：降级必须是**第一条**事件
+        #    顺序就是信息 —— 若排在回答之后，用户已经把「连接失败」当结论读了。
+        first_type = None
+        try:
+            with opener.open(
+                WEB_BASE + "/api/chat?q=" + urllib.parse.quote("测试降级")
+                + "&backend=gpu41", timeout=60
+            ) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line.startswith("data:"):
+                        first_type = json.loads(line[5:].strip()).get("type")
+                        break
+        except Exception as error:  # noqa: BLE001
+            check(False, "SSE 可读", f"{type(error).__name__}: {error}")
+        if first_type is not None:
+            check(first_type == "degraded",
+                  "SSE 首事件是 degraded（不是等回答完才说）", f"首事件={first_type}")
+    finally:
+        server.should_exit = True
+        scratch.cleanup()
+        os.environ.pop("AIRNAV_GPU41_URL", None)
+
+
 def main() -> int:
     layer_1_unreachable()
     layer_2_reachable()
@@ -163,6 +288,7 @@ def main() -> int:
     layer_4_cli_survives()
     layer_5_json_field()
     layer_6_tools_work()
+    layer_7_web_degraded()
 
     failed = [item for item in RESULTS if not item[0]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} 项符合预期")

@@ -223,11 +223,12 @@ def _checks() -> list[Check]:
         ),
         Check(
             key="backend",
-            title="后端探活与降级（不可达照常启动 · 状态进结构化字段）",
+            title="后端探活与降级（CLI + 网页端 · 不可达照常启动）",
             argv=["-m", "agent.scripts.check_backend"],
-            # 用必然连不上的 RFC 5737 地址 + health 桩构造两态，不联网不需要模型。
-            # ⚠️ 它必真跑一次 `agent.cli ask`（子进程），所以比纯单元自检慢一些 ——
-            #    但「不可达时有没有提前 return 1」只在子进程里看得见。
+            # 7 层：判据三态（可达/不可达/缺模型）+ CLI 端到端 + JSON 字段 +
+            # 工具可用性 + 网页端（含 /health 不被牵连、SSE 首事件顺序）。
+            # 用必然连不上的 RFC 5737 地址 + health 桩构造，不联网不需要模型。
+            # ⚠️ 第 4/7 层会真起子进程与 uvicorn，所以比纯单元自检慢。
             needs_cases=False,
             timeout=600,
             category="治理",
