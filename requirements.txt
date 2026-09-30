@@ -1,0 +1,23 @@
+# AirNav-Agent 运行 + 回归门禁所需依赖（CI 与干净 clone 用）
+#
+# 与 requirements_windows.txt 的区别：
+#   - 这份是「无界面也能跑起来」的集子，覆盖 agent/ 全部 import 以及
+#     V1 规划内核（agent/core/navbridge.py 在模块级 import 它，所以 vtk / PySide6 省不掉）；
+#   - 不含 paramiko（那是 SSH 到 GPU 服务器用的，离线跑门禁不需要）；
+#   - 多了网页端所需的 starlette / uvicorn，以及 MCP 自检用的 mcp。
+#
+# 名字必须叫 requirements.txt：actions/setup-python 的 `cache: pip`
+# 只认 `**/requirements.txt` 与 `**/pyproject.toml`，名字不对会直接报错退出。
+numpy
+scipy
+scikit-image
+SimpleITK
+vtk
+PySide6
+pydantic
+pydicom
+packaging
+requests
+starlette
+uvicorn
+mcp
